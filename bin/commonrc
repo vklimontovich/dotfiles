@@ -1,0 +1,190 @@
+# commonrc — shell config sourced by both bash and zsh.
+# Sets PATH, aliases, completions, prompt-time hooks, venv auto-activation,
+# and lazy-loads tooling. Loaded from .zshrc / .bashrc.
+
+export EDITOR=nano
+export REACT_EDITOR=idea
+
+# Disable virtualenv from modifying the prompt (we handle it in our custom prompt)
+export VIRTUAL_ENV_DISABLE_PROMPT=1
+
+add_to_path() {
+    local new_path="$PATH"
+    local dir
+    for dir in "$@"; do
+        if [ -d "$dir" ] && [[ ":$new_path:" != *":$dir:"* ]]; then
+            new_path="$dir:$new_path"
+        fi
+    done
+    export PATH="$new_path"
+}
+
+if [ -f `dirname $0`/commonrc.secrets ]; then
+    source `dirname $0`/commonrc.secrets
+fi
+
+if [ -x /usr/libexec/java_home ]; then
+    JAVA_HOME=$(/usr/libexec/java_home 2>/dev/null)
+    if [ -d "$JAVA_HOME" ]; then
+        export JAVA_HOME
+    fi
+fi
+
+if [ -f $HOME/Library/Android/sdk ]; then
+	export ANDROID_SDK_ROOT=$HOME/Library/Android/sdk
+fi
+
+export CONFLUENT_HOME=~/confluent-platform
+
+add_to_path \
+    ~/bin \
+    ~/bin/local \
+    /sbin \
+    /usr/sbin \
+    /usr/local/sbin \
+    /opt/homebrew/bin \
+    /opt/homebrew/sbin \
+    /usr/local/go/bin \
+    ~/go/bin \
+    ~/.yarn/bin \
+    ~/.config/yarn/global/node_modules/.bin \
+    ~/.pyenv/shims \
+    ~/.bun \
+    ~/.cargo/bin \
+    "$CONFLUENT_HOME/bin" \
+    ~/.local/bin
+
+alias pnpm='ding pnpm'
+alias bun='ding bun'
+alias ll='ls -l -h'
+
+alias k='kubectl'
+alias dotfiles=~/dotfiles/dotfiles
+
+source `dirname $0`/z
+
+if [ -n "$ZSH_VERSION" ]; then
+  precmd() { print -Pn "\e]0;%n@%m: %~\a"; }
+fi
+
+
+# ============================================================================
+# LAZY-LOADING INFRASTRUCTURE
+# ============================================================================
+
+# Generic lazy-load function
+# Usage: _lazy_load <marker_var> <init_function> <command> [<command2> ...]
+_lazy_load() {
+  local marker_var="$1"
+  local init_func="$2"
+  shift 2
+
+  # Check if already loaded
+  if [[ "${(P)marker_var}" == "1" ]]; then
+    return 0
+  fi
+
+  # Unset all placeholder functions
+  for cmd in "$@"; do
+    unset -f "$cmd" 2>/dev/null
+  done
+
+  # Run initialization
+  eval "$init_func"
+
+  # Mark as loaded
+  eval "$marker_var=1"
+}
+
+# Lazy-load NVM for faster shell startup
+#if [ -d "$HOME/.nvm" ]; then
+#  export NVM_DIR="$HOME/.nvm"
+#  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+#  # Lazy-load function
+#  _lazy_load_nvm() {
+
+#    # Load shell-specific completion
+#    # ZSH completion is typically included in nvm.sh, but load it explicitly if needed
+#    if [ -n "${BASH_VERSION-}" ] && [ -s "$NVM_DIR/bash_completion" ]; then
+#      . "$NVM_DIR/bash_completion"
+#    fi
+#  }
+
+#  # Create placeholder functions that load NVM on first use
+#  nvm() { _lazy_load _NVM_LOADED _lazy_load_nvm nvm node npm npx; nvm "$@"; }
+#  node() { _lazy_load _NVM_LOADED _lazy_load_nvm nvm node npm npx; node "$@"; }
+#  npm() { _lazy_load _NVM_LOADED _lazy_load_nvm nvm node npm npx; npm "$@"; }
+#  npx() { _lazy_load _NVM_LOADED _lazy_load_nvm nvm node npm npx; npx "$@"; }
+#fi
+
+# fnm
+FNM_PATH="/opt/homebrew/opt/fnm/bin"
+if [ -d "$FNM_PATH" ]; then
+  eval "$(fnm env --use-on-cd)"
+fi
+
+# kubectl, aws, and gcloud completions now loaded via Homebrew site-functions in fpath
+
+
+if [ -n "$ZSH_VERSION" ]; then
+  bindkey "\e\e[D" beginning-of-line
+  bindkey "\e\e[C" end-of-line
+fi
+
+# Enable direnv if installed
+if command -v direnv >/dev/null 2>&1; then
+  if [ -n "$ZSH_VERSION" ]; then
+    eval "$(direnv hook zsh)"
+  elif [ -n "$BASH_VERSION" ]; then
+    eval "$(direnv hook bash)"
+  fi
+fi
+
+# Auto-activate/deactivate virtualenv on directory change (ZSH only)
+if [ -n "$ZSH_VERSION" ]; then
+  autoload -U add-zsh-hook
+
+  _venv_auto_activate() {
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] chpwd triggered in: $PWD"
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] Current VIRTUAL_ENV: ${VIRTUAL_ENV:-none}"
+
+    if [ -f ".venv/bin/activate" ]; then
+      # Only activate if not already in this venv
+      if [ "$VIRTUAL_ENV" != "$PWD/.venv" ]; then
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] Activating venv: $PWD/.venv"
+        source .venv/bin/activate
+        echo "🐍 activated .venv/bin/activate →  $VIRTUAL_ENV_PROMPT, $(which python)"
+      else
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] Already in this venv"
+      fi
+    else
+      [ "$DEBUG" = "1" ] && echo "[DEBUG] No .venv/bin/activate found"
+      # Deactivate if we were in a venv and moved out of its directory
+      if [ -n "$VIRTUAL_ENV" ]; then
+        local venv_dir="${VIRTUAL_ENV%/*}"
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] venv_dir: $venv_dir"
+        if [[ "$PWD" != "$venv_dir"* ]]; then
+          [ "$DEBUG" = "1" ] && echo "[DEBUG] Deactivating venv"
+        	echo " ❌ 🐍 Deactivating $VIRTUAL_ENV_PROMPT"
+          	deactivate 2>/dev/null
+        else
+          [ "$DEBUG" = "1" ] && echo "[DEBUG] Still in venv directory tree"
+        fi
+      fi
+    fi
+  }
+
+  add-zsh-hook chpwd _venv_auto_activate
+  # Run once on shell start
+   [ "$DEBUG" = "1" ] && echo "initially activating venv on : $PWD"
+  _venv_auto_activate
+fi
+
+# Restore AWS profile from previous session
+if [ -f "$HOME/.aws-profile" ]; then
+  export AWS_PROFILE="$(cat "$HOME/.aws-profile")"
+fi
+
+# Source selector functions
+source ~/bin/selectors

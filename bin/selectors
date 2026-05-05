@@ -1,0 +1,125 @@
+# selectors — fzf-driven pickers for context switching. Sourced from commonrc.
+#   ap [profile]   pick AWS profile (writes previous to ~/.aws-profile)
+#   kk [context]   pick kubectl context
+#   kn [namespace] pick kubectl namespace in current context
+
+# AWS profile selector
+ap() {
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "⚠️  'fzf' is not installed. Please install it first"
+    return 1
+  fi
+
+  local profiles current_profile profile aws_profile_file
+  aws_profile_file="$HOME/.aws-profile"
+
+  profiles=($(aws configure list-profiles 2>/dev/null))
+  if [ ${#profiles[@]} -eq 0 ]; then
+    echo "No AWS profiles found. Run 'aws configure' first."
+    return 1
+  fi
+
+  current_profile="${AWS_PROFILE:-none}"
+
+  if [ $# -eq 0 ]; then
+    profile=$(for p in "${profiles[@]}"; do
+      if [ "$p" = "$current_profile" ]; then
+        echo "• $p"
+      else
+        echo "  $p"
+      fi
+    done | fzf --ansi --no-sort --no-mouse --prompt="Select AWS profile > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+  else
+    profile="$1"
+  fi
+
+  if [ -n "$profile" ]; then
+    if [ -n "$AWS_PROFILE" ]; then
+      echo "$AWS_PROFILE" > "$aws_profile_file"
+    fi
+    export AWS_PROFILE="$profile"
+    echo "✅ Switched to AWS profile: $AWS_PROFILE"
+  fi
+}
+
+# K8s context selector
+kk() {
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "⚠️  'fzf' is not installed. Please install it first"
+    return 1
+  fi
+
+  if ! command -v kubectl >/dev/null 2>&1; then
+    echo "⚠️  'kubectl' is not installed. Please install it first"
+    return 1
+  fi
+
+  local contexts current_context selected_context
+  contexts=($(kubectl config get-contexts -o name 2>/dev/null))
+  if [ ${#contexts[@]} -eq 0 ]; then
+    echo "No Kubernetes contexts found. Check your kubeconfig."
+    return 1
+  fi
+
+  current_context=$(kubectl config current-context 2>/dev/null || echo "none")
+
+  if [ $# -eq 0 ]; then
+    selected_context=$(for c in "${contexts[@]}"; do
+      if [ "$c" = "$current_context" ]; then
+        echo "• $c"
+      else
+        echo "  $c"
+      fi
+    done | fzf --ansi --no-sort --no-mouse --prompt="Select K8s context > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+  else
+    selected_context="$1"
+  fi
+
+  if [ -n "$selected_context" ]; then
+    kubectl config use-context "$selected_context" >/dev/null 2>&1
+    echo "✅ Switched to K8s context: $selected_context"
+  fi
+}
+
+# K8s namespace selector
+kn() {
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "⚠️  'fzf' is not installed. Please install it first"
+    return 1
+  fi
+
+  if ! command -v kubectl >/dev/null 2>&1; then
+    echo "⚠️  'kubectl' is not installed. Please install it first"
+    return 1
+  fi
+
+  local namespaces current_namespace selected_namespace
+  namespaces=($(kubectl get namespaces -o name 2>/dev/null | sed 's|^namespace/||'))
+  if [ ${#namespaces[@]} -eq 0 ]; then
+    echo "No Kubernetes namespaces found. Check your kubeconfig and connection."
+    return 1
+  fi
+
+  current_namespace=$(kubectl config view --minify -o jsonpath='{.contexts[0].context.namespace}' 2>/dev/null || echo "default")
+  if [ -z "$current_namespace" ]; then
+    current_namespace="default"
+  fi
+
+  if [ $# -eq 0 ]; then
+    selected_namespace=$(for ns in "${namespaces[@]}"; do
+      if [ "$ns" = "$current_namespace" ]; then
+        echo "• $ns"
+      else
+        echo "  $ns"
+      fi
+    done | fzf --ansi --no-sort --no-mouse --prompt="Select K8s namespace > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+  else
+    selected_namespace="$1"
+  fi
+
+  if [ -n "$selected_namespace" ]; then
+    kubectl config set-context --current --namespace="$selected_namespace" >/dev/null 2>&1
+    echo "✅ Set default namespace to: $selected_namespace"
+  fi
+}
+

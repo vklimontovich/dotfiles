@@ -1,0 +1,88 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "Bash(git *)",
+      "Bash(pnpm *)",
+      "Bash(uv *)",
+      "Bash(bun *)",
+      "Bash(bunx *)",
+      "Bash(mkdir *)",
+      "Bash(gh *)",
+      "Bash(curl *)",
+      "Bash(env *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl describe *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl top *)",
+      "Bash(kubectl explain *)",
+      "Bash(kubectl api-resources *)",
+      "Bash(kubectl version *)",
+      "Bash(kubectl cluster-info *)",
+      "Bash(helm list *)",
+      "Bash(helm get *)",
+      "Bash(helm status *)",
+      "Bash(helm show *)",
+      "Bash(helm history *)",
+      "Bash(helm search *)",
+      "Bash(helm version *)",
+      "Bash(docker ps *)",
+      "Bash(docker images *)",
+      "Bash(docker logs *)",
+      "Bash(docker inspect *)",
+      "Bash(docker stats *)",
+      "Bash(docker version *)",
+      "Bash(docker info *)",
+      "Bash(docker network ls *)",
+      "Bash(docker volume ls *)",
+      "Bash(grep:*)",
+      "Bash(for file in sql/views/*.sql)",
+      "Bash(do grep -i \"CREATE.*VIEW\" \"$file\")",
+      "Bash(for file in sql/tables/*.sql sql/tables_talend/*.sql)",
+      "Bash(do grep -i \"CREATE TABLE\" \"$file\")",
+      "Bash(do awk '/CREATE \\(OR REPLACE \\)?\\(MATERIALIZED \\)?VIEW/ {gsub\\(/.*VIEW /, \"\"\"\"\\); gsub\\(/ AS.*/, \"\"\"\"\\); gsub\\(/\\\\$\\\\{bundle\\\\.variables\\\\.db\\\\}\\\\./, \"\"\"\"\\); gsub\\(/\\\\$\\\\{bundle\\\\.variables\\\\.schema\\\\}\\\\./, \"\"\"\"\\); gsub\\(/ /, \"\"\"\"\\); if \\(/MATERIALIZED/\\) print $0 \"\" | MATERIALIZED VIEW | '\"$file\"'\"\"; else print $0 \"\" | VIEW | '\"$file\"'\"\"; exit}' \"$file\")",
+      "Bash(done)",
+      "Bash(for file in sql/streaming/*.sql)",
+      "Bash(do grep -i \"CREATE OR REFRESH STREAMING TABLE\" \"$file\")"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"'"
+          }
+        ]
+      }
+    ]
+  },
+  "alwaysThinkingEnabled": true,
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark-ansi",
+  "verbose": true,
+  "preferredNotifChannel": "iterm2",
+  "remoteControlAtStartup": true,
+  "skipAutoPermissionPrompt": true,
+  "feedbackSurveyState": {
+    "lastShownTime": 1753994697574
+  },
+  "effortLevel": "high"
+}

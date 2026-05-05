@@ -1,0 +1,19 @@
+#!/bin/bash
+# mate — open a file in a GUI editor (legacy name from TextMate days).
+# macOS: opens VS Code. Linux: gedit if a display is available, else nano.
+# Creates the file first if it doesn't exist. Usage: `mate notes.md`.
+
+if [ ! -f $1 ]; then
+	touch $1
+fi
+
+if [[ `uname` = "Darwin" ]]; then
+	open -a 'Visual Studio Code' $*
+else
+	if [[ -z "${XAUTHORITY}" ]]; then
+		nano $*
+	else
+		bgrun gedit $*
+	fi
+
+fi

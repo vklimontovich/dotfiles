@@ -1,0 +1,86 @@
+# Ghostty config. Reload after edits: cmd+shift+, in Ghostty, or restart the app.
+
+# ---------- Theme ----------
+# Tango Dark — same palette as the iTerm "Default" profile (black bg, classic ANSI).
+theme = Builtin Tango Dark
+
+# ---------- Font ----------
+font-family = JetBrainsMono Nerd Font
+font-size = 12
+
+# ---------- Behavior ----------
+# Option key sends Esc+ (was "Option Key Sends = 2" in iTerm).
+macos-option-as-alt = true
+
+# Auto-install Ghostty's terminfo + set TERM on remote hosts when ssh'ing,
+# so backspace / arrow keys work in remote shells. Cache: `ghostty +ssh-cache`.
+shell-integration-features = ssh-env,ssh-terminfo
+
+# Cursor / mouse
+cursor-style = block
+cursor-style-blink = false
+mouse-hide-while-typing = true
+
+# Scrollback (iTerm had 1000; Ghostty's default of 10k is saner — keep it).
+# Uncomment to match iTerm exactly:
+# scrollback-limit = 1000
+
+# Bell — Ghostty's default `bell-features` already does no-audio + visual
+# (attention/title flash), matching your iTerm "Visual Bell on, Silence Bell off".
+# Override here if you want a different mix, e.g.:
+# bell-features = no-system,no-audio,attention,title,border
+
+# ---------- Keybindings ----------
+# Mac-style line editing (ported from iTerm Keyboard Map for Default profile)
+keybind = cmd+left=text:\x01
+keybind = cmd+right=text:\x05
+keybind = cmd+backspace=text:\x15
+keybind = opt+backspace=text:\x1b\x7f
+
+# Your new overrides: send Alt+key to the terminal.
+# \x1b is ESC; ESC+<char> is what Option/Alt+<char> produces in a terminal.
+keybind = cmd+t=text:\x1bt
+keybind = cmd+opt+left=text:\x1b[
+keybind = cmd+opt+right=text:\x1b]
+keybind = cmd+w=text:\x1bx
+
+# Cmd+C → ESC c (Alt+c) → zellij's "Alt c" binding runs Copy on the
+# current mouse selection. Keeps zellij mouse_mode + copy_on_select=false,
+# without requiring Option-drag.
+keybind = cmd+c=text:\x1bc
+
+# Cmd+<key> for editor apps (nvim, micro). Forwarded as Alt+<key>.
+keybind = cmd+s=text:\x1bs
+keybind = cmd+q=text:\x1bq
+keybind = cmd+f=text:\x1bf
+keybind = cmd+a=text:\x1ba
+
+# Cmd+Shift+Left/Right → Shift+Home / Shift+End (line selection in nvim/micro)
+keybind = cmd+shift+left=text:\x1b[1;2H
+keybind = cmd+shift+right=text:\x1b[1;2F
+
+# Opt+Shift+Left/Right → word selection
+keybind = opt+shift+left=text:\x1b[1;4D
+keybind = opt+shift+right=text:\x1b[1;4C
+
+# Shift+Enter sends LF instead of CR — Claude Code (and readline apps) treat
+# LF as "newline in input" and CR as "submit". Ported from iTerm.
+keybind = shift+enter=text:\n
+
+# --- Disable Ghostty's tab/split bindings (zellij owns multiplexing) ---
+keybind = cmd+d=unbind
+keybind = cmd+shift+d=unbind
+keybind = cmd+shift+enter=unbind
+keybind = cmd+shift+left_bracket=unbind
+keybind = cmd+shift+right_bracket=unbind
+keybind = ctrl+tab=unbind
+keybind = ctrl+shift+tab=unbind
+keybind = cmd+1=unbind
+keybind = cmd+2=unbind
+keybind = cmd+3=unbind
+keybind = cmd+4=unbind
+keybind = cmd+5=unbind
+keybind = cmd+6=unbind
+keybind = cmd+7=unbind
+keybind = cmd+8=unbind
+keybind = cmd+9=unbind

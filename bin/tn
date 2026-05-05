@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# tn — rename the current zellij tab.
+#
+#   tn              auto: cwd, or claude/codex/ssh in pane's TTY
+#   tn --cmd <c>    auto with command context (intended for preexec hook)
+#   tn <name>       manual: rename and latch (auto calls become no-ops)
+#   tn --reset      clear latch (and drift marker) so auto resumes
+#
+# State files keyed by (zellij session, parent shell PID), under
+# ${TMPDIR:-/tmp}/zellij-tn. macOS sets TMPDIR to a per-user dir; Linux
+# usually doesn't, so it falls back to /tmp. Files:
+#   <key>.lock — present when manually latched
+#   <key>.last — name we last applied (drift detection)
+#
+# Drift detection: if the focused tab's current name differs from `.last`, the
+# tab was renamed by someone other than us — back off until --reset.
+
+set -u
+[[ -n "${ZELLIJ:-}" ]] || exit 0
+
+MAXLEN=24
+STATE_DIR="${TMPDIR:-/tmp}/zellij-tn"
+mkdir -p "$STATE_DIR"
+KEY="${ZELLIJ_SESSION_NAME:-default}-$PPID"
+LOCK="$STATE_DIR/$KEY.lock"
+LAST="$STATE_DIR/$KEY.last"
+
+middle_trunc() {
+    local s=$1 max=${2:-$MAXLEN}
+    local len=${#s}
+    if (( len <= max )); then printf '%s' "$s"; return; fi
+    local kl=$(( (max - 3) / 2 ))
+    local kr=$(( max - 3 - kl ))
+    printf '%s...%s' "${s:0:kl}" "${s: -kr}"
+}
+
+cwd_name() {
+    local p=$PWD
+    [[ $p == "$HOME" ]] && { printf '~'; return; }
+    [[ $p == / ]] && { printf '/'; return; }
+    local last=${p##*/} parent=${p%/*} penult
+    penult=${parent##*/}
+    if [[ -n $penult && $parent != "$last" && $parent != "" ]]; then
+        printf '%s/%s' "$penult" "$last"
+    else
+        printf '%s' "$last"
+    fi
+}
+
+ssh_host() {
+    local args=()
+    read -ra args <<< "$1"
+    local i=1 a
+    while (( i < ${#args[@]} )); do
+        a=${args[$i]}
+        case $a in
+            -[bcDEeFIiJLlmOopQRSWw]) ((i+=2)); continue ;;
+            -*) ((i+=1)); continue ;;
+            *) printf '%s' "${a#*@}"; return ;;
+        esac
+    done
+}
+
+derive_for_cmd() {
+    local cmd=$1 first
+    first=${cmd%% *}
+    first=${first##*/}
+    case $first in
+        claude) printf 'claude · %s' "$(cwd_name)" ;;
+        codex)  printf 'codex · %s'  "$(cwd_name)" ;;
+        ssh)
+            local h
+            h=$(ssh_host "$cmd")
+            if [[ -n $h ]]; then printf 'ssh · %s' "$h"; else printf 'ssh'; fi
+            ;;
+        *) cwd_name ;;
+    esac
+}
+
+detect_running() {
+    local tty
+    tty=$(ps -p "$PPID" -o tty= 2>/dev/null | tr -d ' ')
+    [[ -z $tty ]] && return
+    ps -t "$tty" -o pid=,comm= 2>/dev/null | awk -v sh="$PPID" '
+        $1 != sh && $2 ~ /^(claude|codex|ssh)$/ { print $2; exit }'
+}
+
+focused_tab() {
+    zellij action dump-layout 2>/dev/null | awk '
+        /^[[:space:]]*tab[[:space:]]/ && /focus=true/ {
+            if (match($0, /name="[^"]*"/)) {
+                print substr($0, RSTART+6, RLENGTH-7)
+                exit
+            }
+        }'
+}
+
+drifted() {
+    [[ -f $LAST ]] || return 1
+    local last_set focused
+    last_set=$(cat "$LAST")
+    focused=$(focused_tab)
+    [[ -n $focused && $focused != "$last_set" ]]
+}
+
+apply() {
+    local raw=$1 name
+    name=$(middle_trunc "$raw" "$MAXLEN")
+    [[ -f $LAST && "$(cat "$LAST")" == "$name" ]] && return 0
+    if zellij action rename-tab "$name" 2>/dev/null; then
+        printf '%s' "$name" > "$LAST"
+    fi
+}
+
+apply_auto() {
+    local cmd=${1:-} name
+    if [[ -n $cmd ]]; then
+        name=$(derive_for_cmd "$cmd")
+    else
+        local proc
+        proc=$(detect_running)
+        if [[ -n $proc ]]; then
+            name=$(derive_for_cmd "$proc")
+        else
+            name=$(cwd_name)
+        fi
+    fi
+    apply "$name"
+}
+
+case "${1:-}" in
+    --reset)
+        rm -f "$LOCK" "$LAST"
+        apply_auto
+        ;;
+    --cmd)
+        [[ -e $LOCK ]] && exit 0
+        drifted && exit 0
+        apply_auto "${2:-}"
+        ;;
+    "")
+        [[ -e $LOCK ]] && exit 0
+        drifted && exit 0
+        apply_auto
+        ;;
+    *)
+        apply "$*"
+        : > "$LOCK"
+        ;;
+esac

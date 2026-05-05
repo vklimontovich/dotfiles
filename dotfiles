@@ -1,0 +1,296 @@
+#!/bin/bash
+set -e
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+rand_str() { date +"%Y%m%d_%H%M%S"; }
+log()      { printf "[%-7s] %s\n" "$1" "$2"; }
+
+# Idempotent symlink: src -> dst.
+#
+# Behavior at dst:
+#   missing       -> create link
+#   correct link  -> skip (log OK)
+#   stale link    -> unlink, create link
+#   file or dir   -> diff vs src; identical => remove; differ => backup; then link
+do_link() {
+    local src="$1"
+    local dst="$2"
+
+    if [ ! -e "$src" ]; then
+        log "ERROR" "source missing: $src"
+        return 1
+    fi
+
+    local parent
+    parent="$(dirname "$dst")"
+    if [ ! -d "$parent" ]; then
+        log "MKDIR" "$parent"
+        mkdir -p "$parent"
+    fi
+
+    if [ -L "$dst" ]; then
+        local current
+        current="$(readlink "$dst")"
+        if [ "$current" = "$src" ]; then
+            log "OK" "$dst -> $src (already linked)"
+            return 0
+        fi
+        log "UNLINK" "$dst (was -> $current)"
+        unlink "$dst"
+    elif [ -e "$dst" ]; then
+        if diff -rq "$src" "$dst" >/dev/null 2>&1; then
+            log "REMOVE" "$dst (identical to $src)"
+            rm -rf "$dst"
+        else
+            local backup="$dst.bak.$(rand_str)"
+            log "BACKUP" "$dst -> $backup"
+            mv "$dst" "$backup"
+        fi
+    else
+        log "MISSING" "$dst"
+    fi
+
+    log "LINK" "$src -> $dst"
+    ln -s "$src" "$dst"
+}
+
+# Symlink a path that lives at the same relative location under $DIR and $HOME.
+link_rel() { do_link "$DIR/$1" "$HOME/$1"; }
+
+# Remove symlinks in $1 that point into $DIR but whose target no longer exists.
+clean_stale_in() {
+    local target_dir="$1"
+    [ -d "$target_dir" ] || return 0
+    local f link_target
+    for f in "$target_dir"/* "$target_dir"/.[!.]*; do
+        [ -L "$f" ] || continue
+        link_target="$(readlink "$f")"
+        case "$link_target" in
+            "$DIR"/*)
+                if [ ! -e "$link_target" ]; then
+                    log "STALE" "$f -> $link_target (removing)"
+                    unlink "$f"
+                fi
+                ;;
+        esac
+    done
+}
+
+cmd_init() {
+    link_rel "bin"
+    link_rel ".bash_profile"
+    link_rel ".zshrc"
+    link_rel ".bashrc"
+    link_rel ".inputrc"
+    link_rel ".config/zellij/config.kdl"
+    link_rel ".config/zellij/layouts"
+    link_rel ".config/ghostty/config"
+    link_rel ".config/nvim"
+
+    do_link "$DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
+    do_link "$DIR/claude/settings.json" "$HOME/.claude/settings.json"
+    do_link "$DIR/claude/docs"          "$HOME/.claude/docs"
+
+    if [ -d "$DIR/claude/skills" ]; then
+        for skill in "$DIR"/claude/skills/*/; do
+            [ -d "$skill" ] || continue
+            local name
+            name="$(basename "$skill")"
+            do_link "$DIR/claude/skills/$name" "$HOME/.claude/skills/$name"
+        done
+    fi
+
+    clean_stale_in "$HOME/.claude/skills"
+}
+
+# Discover ssh key pairs (private + matching .pub) in ~/.ssh.
+# Prints one base name per line (e.g. "id_ed25519").
+list_ssh_key_pairs() {
+    local ssh_dir="$HOME/.ssh"
+    [ -d "$ssh_dir" ] || return 0
+    local pub priv
+    for pub in "$ssh_dir"/*.pub; do
+        [ -f "$pub" ] || continue
+        priv="${pub%.pub}"
+        [ -f "$priv" ] || continue
+        basename "$priv"
+    done
+}
+
+deploy_ssh_keys() {
+    local server="$1"
+    local keys_csv="$2"
+    local ssh_dir="$HOME/.ssh"
+
+    local -a pairs=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && pairs+=("$line")
+    done < <(list_ssh_key_pairs)
+
+    if [ ${#pairs[@]} -eq 0 ]; then
+        log "INFO" "no ssh key pairs found in $ssh_dir; skipping"
+        return 0
+    fi
+
+    local -a selected=()
+    if [ -n "$keys_csv" ]; then
+        if [ "$keys_csv" = "all" ]; then
+            selected=("${pairs[@]}")
+        else
+            local IFS=','
+            read -ra selected <<< "$keys_csv"
+        fi
+    else
+        if ! command -v fzf >/dev/null 2>&1; then
+            log "ERROR" "fzf not installed; pass --keys k1,k2 or --no-keys"
+            return 1
+        fi
+        local picked=""
+        picked="$({ printf '<all>\n'; printf '%s\n' "${pairs[@]}"; } | fzf --multi --no-mouse \
+            --prompt="Select SSH keys to copy (TAB to multi-select) > " \
+            --height=~30 --reverse)" || true
+        if [ -z "$picked" ]; then
+            log "INFO" "no keys selected; skipping ssh key copy"
+            return 0
+        fi
+        local has_all=0
+        while IFS= read -r line; do
+            if [ "$line" = "<all>" ]; then
+                has_all=1
+            else
+                selected+=("$line")
+            fi
+        done <<< "$picked"
+        if [ "$has_all" -eq 1 ]; then
+            selected=("${pairs[@]}")
+        fi
+    fi
+
+    local name
+    for name in "${selected[@]}"; do
+        if [ ! -f "$ssh_dir/$name" ] || [ ! -f "$ssh_dir/$name.pub" ]; then
+            log "ERROR" "ssh key pair not found: $name (expected $ssh_dir/$name and $ssh_dir/$name.pub)"
+            return 1
+        fi
+    done
+
+    log "REMOTE" "ensuring ~/.ssh exists on $server"
+    ssh "$server" 'mkdir -p ~/.ssh && chmod 700 ~/.ssh'
+
+    local -a files=()
+    for name in "${selected[@]}"; do
+        files+=("$ssh_dir/$name" "$ssh_dir/$name.pub")
+    done
+
+    log "RSYNC" "ssh keys (${selected[*]}) -> $server:~/.ssh/"
+    rsync -a "${files[@]}" "$server:.ssh/"
+
+    local fix_cmd=""
+    for name in "${selected[@]}"; do
+        fix_cmd="${fix_cmd}chmod 600 ~/.ssh/$name && chmod 644 ~/.ssh/$name.pub && "
+    done
+    fix_cmd="${fix_cmd}true"
+    ssh "$server" "$fix_cmd"
+    log "OK" "ssh keys deployed to $server"
+}
+
+cmd_deploy() {
+    local server=""
+    local no_keys=0
+    local keys_csv=""
+    local ignore_changes=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-keys)        no_keys=1; shift ;;
+            --keys)           keys_csv="${2:-}"; shift 2 ;;
+            --keys=*)         keys_csv="${1#*=}"; shift ;;
+            --ignore-changes) ignore_changes=1; shift ;;
+            -*) log "ERROR" "unknown flag: $1"; return 1 ;;
+            *)
+                if [ -z "$server" ]; then
+                    server="$1"
+                else
+                    log "ERROR" "unexpected argument: $1"
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$server" ]; then
+        log "ERROR" "usage: dotfiles deploy <server> [--no-keys | --keys k1,k2,...]"
+        return 1
+    fi
+
+    if [ "$no_keys" -eq 1 ] && [ -n "$keys_csv" ]; then
+        log "ERROR" "--no-keys and --keys are mutually exclusive"
+        return 1
+    fi
+
+    log "CHECK" "ssh access to $server"
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$server" true 2>/dev/null; then
+        log "ERROR" "cannot ssh to $server (BatchMode). Set up host/key first."
+        return 1
+    fi
+
+    if [ "$ignore_changes" -eq 1 ]; then
+        log "SKIP" "remote dirty check (--ignore-changes)"
+    else
+        log "CHECK" "remote ~/dotfiles state on $server"
+        local remote_state
+        remote_state="$(ssh "$server" 'if [ -d ~/dotfiles/.git ]; then cd ~/dotfiles && git status --porcelain --untracked-files=no; else echo "__NOREPO__"; fi')"
+
+        if [ "$remote_state" = "__NOREPO__" ]; then
+            log "INFO" "remote ~/dotfiles missing or not a git repo; will be (re)created"
+        elif [ -n "$remote_state" ]; then
+            log "ERROR" "remote ~/dotfiles has uncommitted changes (tracked files):"
+            printf '%s\n' "$remote_state"
+            log "HINT" "pass --ignore-changes to overwrite"
+            return 1
+        else
+            log "OK" "remote ~/dotfiles is clean"
+        fi
+    fi
+
+    log "RSYNC" "$DIR/ -> $server:~/dotfiles/"
+    rsync -az --delete --exclude='.DS_Store' "$DIR/" "$server:dotfiles/"
+
+    log "REMOTE" "running 'dotfiles init' on $server"
+    ssh "$server" '~/dotfiles/dotfiles init'
+
+    if [ "$no_keys" -eq 1 ]; then
+        log "SKIP" "ssh key copy (--no-keys)"
+        return 0
+    fi
+
+    deploy_ssh_keys "$server" "$keys_csv"
+}
+
+usage() {
+    cat <<EOF
+Usage: dotfiles <command>
+
+Commands:
+  init                      Symlink dotfiles into \$HOME (idempotent)
+  deploy <server> [opts]    Rsync dotfiles to a remote and run init there.
+                            Aborts if remote ~/dotfiles has uncommitted
+                            changes to tracked files.
+                            Options:
+                              --no-keys           skip ssh key copy
+                              --keys k1,k2,...    copy these key pairs
+                                                  (base names in ~/.ssh,
+                                                  or 'all' for every pair)
+                              --ignore-changes    skip remote dirty check
+                            Default: interactive fzf multi-select.
+EOF
+}
+
+case "${1:-}" in
+    init)              shift; cmd_init "$@" ;;
+    deploy)            shift; cmd_deploy "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) log "ERROR" "unknown command: $1"; usage; exit 1 ;;
+esac

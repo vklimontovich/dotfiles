@@ -1,0 +1,201 @@
+# commonrc-post — sourced from .zshrc *after* oh-my-zsh has loaded.
+# Holds the custom `intheloop` two-line prompt (host, cwd, git status, venv,
+# AWS profile, k8s ctx, last-cmd time, exit status) and zsh fpath tweaks.
+
+# pnpm config persists - run manually if needed:
+# if command -v pnpm >/dev/null 2>&1; then
+#   pnpm config set store-dir ~/dev2/.pnpm-store
+# fi
+
+# ============================================================================
+# ZSH-SPECIFIC CONFIGURATIONS
+# ============================================================================
+if [ -n "$ZSH_VERSION" ]; then
+
+  # --------------------------------------------------------------------------
+  # Completions (ZSH only)
+  # --------------------------------------------------------------------------
+  # Completions are now lazy-loaded in bin/commonrc for faster startup
+
+  # Add Homebrew's zsh site-functions to fpath
+  if command -v brew >/dev/null 2>&1; then
+    local brew_site_functions="$(brew --prefix)/share/zsh/site-functions"
+    if [ -d "$brew_site_functions" ]; then
+      fpath+=$brew_site_functions
+    fi
+  fi
+
+  # --------------------------------------------------------------------------
+  # Custom Prompt Configuration (requires oh-my-zsh)
+  # --------------------------------------------------------------------------
+  if [ -n "$ZSH" ] && [ "$ZSH_THEME" = "intheloop" ]; then
+
+    # Command execution time tracking in milliseconds
+    autoload -Uz add-zsh-hook
+    zmodload zsh/datetime  # Load datetime module for EPOCHREALTIME
+    export cmd_exec_time_ms="0"
+
+    _prompt_preexec() {
+      # EPOCHREALTIME is seconds with microsecond precision (e.g., 1234567890.123456)
+      typeset -g cmd_timestamp=$EPOCHREALTIME
+    }
+
+    # Add thousand separators to a number
+    _format_with_commas() {
+      local num="$1"
+      echo "$num" | sed -e :a -e 's/\(.*[0-9]\)\([0-9]\{3\}\)/\1,\2/;ta'
+    }
+
+    _prompt_precmd() {
+      if [[ -n "$cmd_timestamp" ]]; then
+        # Calculate elapsed time in milliseconds
+        local elapsed=$(( (EPOCHREALTIME - cmd_timestamp) * 1000 ))
+        local elapsed_ms=${elapsed%.*}  # Remove decimal part
+
+        # Format with thousand separators
+        typeset -g cmd_exec_time_ms=$(_format_with_commas $elapsed_ms)
+
+        unset cmd_timestamp
+      fi
+    }
+
+    add-zsh-hook preexec _prompt_preexec
+    add-zsh-hook precmd _prompt_precmd
+
+    # Host color based on SSH
+    if [ -n "$SSH_CLIENT" ]; then
+      _prompt_host_color="red"
+    else
+      _prompt_host_color="green"
+    fi
+
+    # Git info for prompt
+    prompt_git_info() {
+      if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        local ref dirty
+        ref=$(git symbolic-ref HEAD 2> /dev/null) || ref="➦ $(git show-ref --head -s --abbrev |head -n1 2> /dev/null)"
+        ref="${ref/refs\/heads\//}"
+
+        # Check if dirty
+        if [[ -n $(git status --porcelain 2> /dev/null | tail -n1) ]]; then
+          dirty=1
+        fi
+
+        # Color based on dirty status
+        if [[ -n $dirty ]]; then
+          echo -n "%{$fg[yellow]%}($ref)%{$reset_color%}"
+        else
+          echo -n "%{$fg[green]%}($ref)%{$reset_color%}"
+        fi
+
+        # Show indicators
+        [[ -n $dirty ]] && echo -n " %{$fg[yellow]%}⚡%{$reset_color%}"
+
+        # Remote status
+        local ahead behind
+        ahead=$(git log --oneline @{u}.. 2>/dev/null | wc -l | tr -d ' ')
+        behind=$(git log --oneline ..@{u} 2>/dev/null | wc -l | tr -d ' ')
+
+        if [[ $ahead -gt 0 ]] && [[ $behind -gt 0 ]]; then
+          echo -n " %{$fg[magenta]%}↕%{$reset_color%}"
+        elif [[ $ahead -gt 0 ]]; then
+          echo -n " %{$fg[magenta]%}↑%{$reset_color%}"
+        elif [[ $behind -gt 0 ]]; then
+          echo -n " %{$fg[magenta]%}↓%{$reset_color%}"
+        fi
+      fi
+    }
+
+    # Build the prompt with top line
+    build_prompt() {
+      # Top line separator in very light gray (color 245)
+      echo -n "%{%F{245}%}"
+      printf '─%.0s' {1..${COLUMNS:-80}}
+      echo -n "%{%f%}"
+      echo ""
+
+      # Build left side
+      local left_prompt=""
+      left_prompt+="%{$fg_bold[grey]%}[%{$reset_color%}%{$fg_bold[${_prompt_host_color}]%}%n@%m%{$reset_color%}%{$fg_bold[grey]%}]%{$reset_color%} "
+      left_prompt+="%{$fg_bold[blue]%}%~%{$reset_color%} "
+      left_prompt+="$(prompt_git_info)"
+
+      # Build right side
+      local right_prompt=""
+      right_prompt+="$(virtualenv_prompt_info)"
+      right_prompt+="$(aws_prompt_info)"
+      right_prompt+="$(k8s_prompt_info)"
+      right_prompt+="$(exec_time_prompt_info)"
+      right_prompt+="$(exit_status_prompt_info)"
+
+      # Calculate visible lengths (strip color codes for calculation)
+      local left_len=${(m)#${(S%%)left_prompt//(\%([KF1]|)\{*\}|\%[Bbkf])}}
+      local right_len=${(m)#${(S%%)right_prompt//(\%([KF1]|)\{*\}|\%[Bbkf])}}
+
+      # Calculate spacing needed
+      local spacing=$(( COLUMNS - left_len - right_len ))
+
+      # Output the complete line
+      echo -n "$left_prompt"
+      printf ' %.0s' {1..$spacing}
+      echo -n "$right_prompt"
+    }
+
+    # Virtualenv display for RPROMPT
+    virtualenv_prompt_info() {
+      if [[ -n "$VIRTUAL_ENV" ]]; then
+        local venv_name=".venv"
+
+        # Try to read prompt from pyvenv.cfg
+        if [[ -f "$VIRTUAL_ENV/pyvenv.cfg" ]]; then
+          local prompt_line=$(grep "^prompt = " "$VIRTUAL_ENV/pyvenv.cfg" 2>/dev/null)
+          if [[ -n "$prompt_line" ]]; then
+            venv_name="${prompt_line#prompt = }"
+          fi
+        fi
+
+        echo -n "🐍 $venv_name "
+      fi
+    }
+
+    # AWS profile display
+    aws_prompt_info() {
+      if [[ -n "$AWS_PROFILE" ]]; then
+        echo -n "%{$fg[yellow]%}aws:$AWS_PROFILE%{$reset_color%} "
+      fi
+    }
+
+    # Kubernetes context display
+    k8s_prompt_info() {
+      if command -v kubectl >/dev/null 2>&1; then
+        local context=$(kubectl config current-context 2>/dev/null)
+        if [[ -n "$context" ]]; then
+          local namespace=$(kubectl config view --minify -o jsonpath='{.contexts[0].context.namespace}' 2>/dev/null)
+          # If no namespace is set, default to "default"
+          if [[ -z "$namespace" ]]; then
+            namespace="default"
+          fi
+          echo -n "%{$fg[blue]%}k8s:$context/$namespace%{$reset_color%} "
+        fi
+      fi
+    }
+
+    # Execution time display - always show with thousand separators
+    exec_time_prompt_info() {
+      echo -n "%{$fg[magenta]%}${cmd_exec_time_ms}ms%{$reset_color%} "
+    }
+
+    # Exit status
+    exit_status_prompt_info() {
+      echo -n "%(?:%{$fg[green]%}✓:%{$fg[red]%}✗)%{$reset_color%} "
+    }
+
+    # Set the prompts
+    PROMPT='$(build_prompt)
+%{$fg_bold[cyan]%}❯%{$reset_color%} '
+
+    RPROMPT=''
+
+  fi
+
+fi

@@ -1,0 +1,46 @@
+#!/bin/bash
+# ding — run a command and notify when it finishes if it took longer than 5s.
+# Usage:
+#   ding <cmd> [args...]   run command, notify on completion if slow
+#   ding                   send a test notification (no args)
+# Aliased in commonrc as `pnpm` and `bun` so long installs/builds nudge you.
+
+THRESHOLD=5
+
+notify_success() {
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$1\" with title \"✅ Done\""
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "✅ Done" "$1"
+  fi
+}
+
+notify_failure() {
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$1\" with title \"❌ Failed\" subtitle \"Exit code $2\""
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "❌ Failed (exit $2)" "$1"
+  fi
+}
+
+if [ $# -eq 0 ]; then
+  notify_success "ding test notification"
+  echo "Sent test notification."
+  exit 0
+fi
+
+start=$(date +%s)
+"$@"
+EXIT_CODE=$?
+end=$(date +%s)
+runtime=$((end - start))
+
+if [ "$runtime" -ge "$THRESHOLD" ]; then
+  if [ $EXIT_CODE -eq 0 ]; then
+    notify_success "$*"
+  else
+    notify_failure "$*" "$EXIT_CODE"
+  fi
+fi
+
+exit $EXIT_CODE

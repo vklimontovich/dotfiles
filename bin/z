@@ -1,0 +1,44 @@
+# Zellij wrapper: `z` attaches to "main" (creating it if needed),
+# `z <name>` attaches to/creates <name>, `z --restart [name]` kills
+# the session and starts fresh. Also sets up zellij-related hooks
+# and aliases. Sourced from commonrc.
+
+z() {
+  local restart=0
+  local session=""
+
+  while (( $# )); do
+    case "$1" in
+      --restart)
+        restart=1
+        ;;
+      -h|--help)
+        echo "Usage: z [--restart] [session-name]"
+        echo "  z                        attach to 'main' (create if missing)"
+        echo "  z <name>                 attach to <name> (create if missing)"
+        echo "  z --restart [name]       kill session and start a fresh one"
+        return 0
+        ;;
+      *)
+        session="$1"
+        ;;
+    esac
+    shift
+  done
+
+  [[ -z "$session" ]] && session="main"
+
+  if (( restart )); then
+    zellij delete-session --force "$session" 2>/dev/null
+  fi
+
+  exec zellij attach -c "$session"
+}
+
+if [ -n "$ZSH_VERSION" ] && [[ -n "$ZELLIJ" ]]; then
+  autoload -Uz add-zsh-hook
+  _tn_preexec() { tn --cmd "$1"; }
+  _tn_precmd()  { tn; }
+  add-zsh-hook preexec _tn_preexec
+  add-zsh-hook precmd  _tn_precmd
+fi

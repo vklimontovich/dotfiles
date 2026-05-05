@@ -1,0 +1,18 @@
+#!/bin/sh
+# idea — open files/dirs in IntelliJ IDEA on macOS. Same idea (heh) as the
+# `idea` launcher Toolbox installs, but lives in dotfiles so it's portable.
+# Usage: `idea .`, `idea path/to/file`.
+
+APP="$HOME/Applications/IntelliJ IDEA.app"
+
+if [ ! -d "$APP" ]; then
+    echo "Idea is not installed. Expected directory: $APP"
+    exit 1
+fi
+
+if ! command -v open > /dev/null 2>&1; then
+    echo "'open' command is not installed or not available in the PATH."
+    exit 1
+fi
+
+open -na "$APP" --args "$@"
