@@ -144,3 +144,11 @@ zstyle ':completion:*:*:cd:*' menu yes select
 source ~/bin/commonrc-post
 # bun completions
 [ -s "$HOME/.bun/_bun" ] && source "$HOME/.bun/_bun"
+
+# Inside Zellij, the terminal facing the remote is Zellij (xterm-256color), not
+# Ghostty. Bypass Ghostty's ssh-terminfo wrapper and force a TERM the remote and
+# Zellij both understand — otherwise remote apps emit xterm-ghostty sequences
+# that Zellij can't render and the cursor jumps around.
+if [[ -n "$ZELLIJ" ]]; then
+  ssh() { TERM=xterm-256color command ssh "$@"; }
+fi
