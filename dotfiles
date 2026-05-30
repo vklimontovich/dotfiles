@@ -4,7 +4,24 @@ set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
 rand_str() { date +"%Y%m%d_%H%M%S"; }
-log()      { printf "[%-7s] %s\n" "$1" "$2"; }
+
+if [ -t 1 ]; then
+    _C_RESET=$'\033[0m'; _C_GREEN=$'\033[32m'; _C_RED=$'\033[31m'
+    _C_YELLOW=$'\033[33m'; _C_DIM=$'\033[2m'
+else
+    _C_RESET=""; _C_GREEN=""; _C_RED=""; _C_YELLOW=""; _C_DIM=""
+fi
+
+log() {
+    local label="$1" msg="$2" color=""
+    case "$label" in
+        OK)              color="$_C_GREEN" ;;
+        MISS|ERROR)      color="$_C_RED" ;;
+        WARN|HINT|STALE) color="$_C_YELLOW" ;;
+        SKIP|INFO)       color="$_C_DIM" ;;
+    esac
+    printf "[${color}%-7s${_C_RESET}] %s\n" "$label" "$msg"
+}
 
 # Idempotent symlink: src -> dst.
 #
@@ -77,6 +94,109 @@ clean_stale_in() {
     done
 }
 
+cmd_check() {
+    local shell_name
+    shell_name="$(basename "${SHELL:-unknown}")"
+    if [ "$shell_name" = "zsh" ]; then
+        log "OK" "shell: zsh ($SHELL)"
+    else
+        log "WARN" "shell is not zsh: $shell_name ($SHELL)"
+    fi
+
+    if command -v zellij >/dev/null 2>&1; then
+        log "OK" "zellij: $(zellij --version 2>/dev/null | head -1)"
+    else
+        log "MISS" "zellij: not installed"
+    fi
+
+    if [ -d "$HOME/.oh-my-zsh" ]; then
+        log "OK" "oh-my-zsh: installed ($HOME/.oh-my-zsh)"
+    else
+        log "MISS" "oh-my-zsh: not installed"
+    fi
+
+    if command -v fzf >/dev/null 2>&1; then
+        log "OK" "fzf: $(fzf --version 2>/dev/null | head -1)"
+    else
+        log "MISS" "fzf: not installed"
+    fi
+}
+
+# Rewrite the dotfiles-managed Include block in ~/.ssh/config to reference
+# whatever snippets currently exist in ~/.ssh/conf.d/. Idempotent: re-runs
+# produce no diff if nothing changed.
+ensure_ssh_includes_block() {
+    local config="$HOME/.ssh/config"
+    local confd="$HOME/.ssh/conf.d"
+    local begin="# >>> dotfiles ssh-includes (managed) >>>"
+    local end="# <<< dotfiles ssh-includes (managed) <<<"
+
+    local body=""
+    if [ -d "$confd" ]; then
+        local f name
+        for f in "$confd"/*; do
+            [ -e "$f" ] || continue
+            name="$(basename "$f")"
+            body="${body}Include ~/.ssh/conf.d/${name}"$'\n'
+        done
+    fi
+
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+
+    local tmp
+    tmp="$(mktemp "${config}.XXXXXX")"
+
+    if [ -e "$config" ]; then
+        local in_block=0 replaced=0 line last
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [ "$in_block" -eq 0 ] && [ "$line" = "$begin" ]; then
+                in_block=1
+                printf '%s\n%s%s\n' "$begin" "$body" "$end" >> "$tmp"
+                replaced=1
+                continue
+            fi
+            if [ "$in_block" -eq 1 ]; then
+                [ "$line" = "$end" ] && in_block=0
+                continue
+            fi
+            printf '%s\n' "$line" >> "$tmp"
+        done < "$config"
+
+        if [ "$replaced" -eq 0 ]; then
+            if [ -s "$tmp" ]; then
+                last=$(tail -c 1 "$tmp")
+                [ -n "$last" ] && printf '\n' >> "$tmp"
+            fi
+            printf '%s\n%s%s\n' "$begin" "$body" "$end" >> "$tmp"
+        fi
+    else
+        printf '%s\n%s%s\n' "$begin" "$body" "$end" > "$tmp"
+    fi
+
+    if [ -e "$config" ] && cmp -s "$config" "$tmp"; then
+        rm "$tmp"
+        log "OK" "$config (managed block unchanged)"
+    else
+        mv "$tmp" "$config"
+        chmod 600 "$config"
+        log "WRITE" "$config (managed block updated)"
+    fi
+}
+
+link_ssh_conf_d() {
+    if [ -d "$DIR/ssh/conf.d" ]; then
+        local f name
+        for f in "$DIR"/ssh/conf.d/*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            do_link "$DIR/ssh/conf.d/$name" "$HOME/.ssh/conf.d/$name"
+        done
+    fi
+    clean_stale_in "$HOME/.ssh/conf.d"
+    ensure_ssh_includes_block
+}
+
 cmd_init() {
     link_rel "bin"
     link_rel ".bash_profile"
@@ -102,6 +222,8 @@ cmd_init() {
     fi
 
     clean_stale_in "$HOME/.claude/skills"
+
+    link_ssh_conf_d
 }
 
 # Discover ssh key pairs (private + matching .pub) in ~/.ssh.
@@ -116,6 +238,67 @@ list_ssh_key_pairs() {
         [ -f "$priv" ] || continue
         basename "$priv"
     done
+}
+
+# List ssh config snippet names available in the repo.
+list_ssh_snippets() {
+    local conf_d="$DIR/ssh/conf.d"
+    [ -d "$conf_d" ] || return 0
+    local f
+    for f in "$conf_d"/*; do
+        [ -f "$f" ] || continue
+        basename "$f"
+    done
+}
+
+# Resolve user selection of snippets (interactive fzf if csv is empty,
+# explicit list otherwise). Prints one snippet name per line on stdout.
+pick_ssh_snippets() {
+    local ssh_csv="$1"
+    local -a snippets=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && snippets+=("$line")
+    done < <(list_ssh_snippets)
+
+    [ ${#snippets[@]} -eq 0 ] && return 0
+
+    if [ "$ssh_csv" = "all" ]; then
+        printf '%s\n' "${snippets[@]}"
+        return 0
+    fi
+
+    if [ -n "$ssh_csv" ]; then
+        local IFS=','
+        local -a names
+        read -ra names <<< "$ssh_csv"
+        printf '%s\n' "${names[@]}"
+        return 0
+    fi
+
+    if ! command -v fzf >/dev/null 2>&1; then
+        log "ERROR" "fzf not installed; pass --ssh all or --no-ssh" >&2
+        return 1
+    fi
+    local picked
+    picked="$({ printf '<all>\n'; printf '%s\n' "${snippets[@]}"; } | fzf --multi --no-mouse \
+        --prompt='Select SSH config snippets to deploy (TAB to multi-select) > ' \
+        --height=~30 --reverse)" || true
+    [ -z "$picked" ] && return 0
+
+    local has_all=0
+    local -a selected=()
+    while IFS= read -r line; do
+        if [ "$line" = "<all>" ]; then
+            has_all=1
+        else
+            selected+=("$line")
+        fi
+    done <<< "$picked"
+    if [ "$has_all" -eq 1 ]; then
+        printf '%s\n' "${snippets[@]}"
+    else
+        printf '%s\n' "${selected[@]}"
+    fi
 }
 
 deploy_ssh_keys() {
@@ -195,10 +378,93 @@ deploy_ssh_keys() {
     log "OK" "ssh keys deployed to $server"
 }
 
+# Yes/no prompt on the controlling terminal. Defaults to yes on empty input.
+confirm() {
+    local prompt="$1" reply
+    [ -r /dev/tty ] || return 1
+    read -r -p "$prompt [Y/n] " reply </dev/tty || return 1
+    case "$reply" in
+        ""|y|Y|yes|YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Pick a single public key path from ~/.ssh. Auto-selects when only one pair
+# exists; otherwise prompts via fzf. Prints the .pub path on stdout.
+pick_ssh_pubkey() {
+    local ssh_dir="$HOME/.ssh"
+    local -a pairs=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && pairs+=("$line")
+    done < <(list_ssh_key_pairs)
+
+    if [ ${#pairs[@]} -eq 0 ]; then
+        log "ERROR" "no ssh key pairs found in $ssh_dir" >&2
+        return 1
+    fi
+
+    if [ ${#pairs[@]} -eq 1 ]; then
+        printf '%s\n' "$ssh_dir/${pairs[0]}.pub"
+        return 0
+    fi
+
+    if ! command -v fzf >/dev/null 2>&1; then
+        log "ERROR" "fzf not installed; cannot pick an ssh key" >&2
+        return 1
+    fi
+    local picked
+    picked="$(printf '%s\n' "${pairs[@]}" | fzf --no-mouse \
+        --prompt='Select SSH key to copy to remote > ' \
+        --height=~30 --reverse)" || true
+    [ -z "$picked" ] && return 0
+    printf '%s\n' "$ssh_dir/$picked.pub"
+}
+
+# Ensure we can ssh to $server with key auth (no password prompt). If we can't,
+# offer to install a public key via ssh-copy-id. The user enters the remote
+# password once there; every later ssh/rsync in the deploy then uses the key.
+ensure_ssh_access() {
+    local server="$1"
+
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$server" true 2>/dev/null; then
+        log "OK" "ssh key access to $server"
+        return 0
+    fi
+
+    log "WARN" "no key-based ssh access to $server"
+    if ! confirm "Copy an ssh key to $server now (you'll enter the remote password once)?"; then
+        log "ERROR" "cannot ssh to $server without a key. Set up host/key first."
+        return 1
+    fi
+
+    local pub
+    pub="$(pick_ssh_pubkey)" || return 1
+    if [ -z "$pub" ]; then
+        log "ERROR" "no public key selected; aborting"
+        return 1
+    fi
+
+    log "COPYID" "installing $(basename "$pub") on $server"
+    if ! ssh-copy-id -i "$pub" "$server"; then
+        log "ERROR" "ssh-copy-id failed for $server"
+        return 1
+    fi
+
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$server" true 2>/dev/null; then
+        log "OK" "ssh key access to $server (after copy)"
+        return 0
+    fi
+
+    log "ERROR" "still no key-based ssh access to $server after ssh-copy-id"
+    return 1
+}
+
 cmd_deploy() {
     local server=""
     local no_keys=0
     local keys_csv=""
+    local no_ssh=0
+    local ssh_csv=""
     local ignore_changes=0
 
     while [ $# -gt 0 ]; do
@@ -206,6 +472,9 @@ cmd_deploy() {
             --no-keys)        no_keys=1; shift ;;
             --keys)           keys_csv="${2:-}"; shift 2 ;;
             --keys=*)         keys_csv="${1#*=}"; shift ;;
+            --no-ssh)         no_ssh=1; shift ;;
+            --ssh)            ssh_csv="${2:-}"; shift 2 ;;
+            --ssh=*)          ssh_csv="${1#*=}"; shift ;;
             --ignore-changes) ignore_changes=1; shift ;;
             -*) log "ERROR" "unknown flag: $1"; return 1 ;;
             *)
@@ -221,7 +490,7 @@ cmd_deploy() {
     done
 
     if [ -z "$server" ]; then
-        log "ERROR" "usage: dotfiles deploy <server> [--no-keys | --keys k1,k2,...]"
+        log "ERROR" "usage: dotfiles deploy <server> [--no-keys | --keys k1,k2,...] [--no-ssh | --ssh all|n1,n2,...]"
         return 1
     fi
 
@@ -230,9 +499,13 @@ cmd_deploy() {
         return 1
     fi
 
+    if [ "$no_ssh" -eq 1 ] && [ -n "$ssh_csv" ]; then
+        log "ERROR" "--no-ssh and --ssh are mutually exclusive"
+        return 1
+    fi
+
     log "CHECK" "ssh access to $server"
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$server" true 2>/dev/null; then
-        log "ERROR" "cannot ssh to $server (BatchMode). Set up host/key first."
+    if ! ensure_ssh_access "$server"; then
         return 1
     fi
 
@@ -255,18 +528,64 @@ cmd_deploy() {
         fi
     fi
 
-    log "RSYNC" "$DIR/ -> $server:~/dotfiles/"
-    rsync -az --delete --exclude='.DS_Store' "$DIR/" "$server:dotfiles/"
+    local -a ssh_selection=()
+    if [ "$no_ssh" -eq 1 ]; then
+        log "SKIP" "ssh config snippets (--no-ssh)"
+    else
+        while IFS= read -r line; do
+            [ -n "$line" ] && ssh_selection+=("$line")
+        done < <(pick_ssh_snippets "$ssh_csv")
+
+        local name
+        for name in "${ssh_selection[@]}"; do
+            if [ ! -f "$DIR/ssh/conf.d/$name" ]; then
+                log "ERROR" "ssh snippet not found: $DIR/ssh/conf.d/$name"
+                return 1
+            fi
+        done
+    fi
+
+    if [ ${#ssh_selection[@]} -gt 0 ]; then
+        log "RSYNC" "$DIR/ -> $server:~/dotfiles/ (ssh snippets: ${ssh_selection[*]})"
+    else
+        log "RSYNC" "$DIR/ -> $server:~/dotfiles/ (no ssh snippets)"
+    fi
+    rsync -az --no-owner --no-group --delete --exclude='.DS_Store' "$DIR/" "$server:dotfiles/"
+
+    # Apple's openrsync rejects --delete-excluded over ssh, so we transfer all
+    # snippets above and prune the unselected ones on the remote ourselves.
+    local keep_str=" ${ssh_selection[*]} "
+    local -a prune=()
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        case "$keep_str" in
+            *" $name "*) ;;
+            *) prune+=("$name") ;;
+        esac
+    done < <(list_ssh_snippets)
+
+    if [ ${#prune[@]} -gt 0 ]; then
+        local quoted=""
+        for name in "${prune[@]}"; do
+            quoted+=" $(printf '%q' "$name")"
+        done
+        log "PRUNE" "ssh snippets on $server: ${prune[*]}"
+        ssh "$server" "cd ~/dotfiles/ssh/conf.d && rm -f --$quoted"
+    fi
 
     log "REMOTE" "running 'dotfiles init' on $server"
     ssh "$server" '~/dotfiles/dotfiles init'
 
     if [ "$no_keys" -eq 1 ]; then
         log "SKIP" "ssh key copy (--no-keys)"
-        return 0
+    else
+        deploy_ssh_keys "$server" "$keys_csv"
     fi
 
-    deploy_ssh_keys "$server" "$keys_csv"
+    log "CHECK" "local environment"
+    cmd_check
+    log "CHECK" "remote environment on $server"
+    ssh "$server" '~/dotfiles/dotfiles check'
 }
 
 usage() {
@@ -275,7 +594,13 @@ Usage: dotfiles <command>
 
 Commands:
   init                      Symlink dotfiles into \$HOME (idempotent)
+  check                     Print status: shell, zellij, oh-my-zsh, fzf
   deploy <server> [opts]    Rsync dotfiles to a remote and run init there.
+                            <server> is an ssh target: a host alias or
+                            user@host (e.g. jitsu005@jitsu005).
+                            If key-based ssh isn't set up yet, offers to copy
+                            a public key via ssh-copy-id (password entered
+                            once), then continues.
                             Aborts if remote ~/dotfiles has uncommitted
                             changes to tracked files.
                             Options:
@@ -283,13 +608,18 @@ Commands:
                               --keys k1,k2,...    copy these key pairs
                                                   (base names in ~/.ssh,
                                                   or 'all' for every pair)
+                              --no-ssh            skip all ssh/conf.d snippets
+                              --ssh n1,n2,...     deploy these snippets
+                                                  (names in ssh/conf.d,
+                                                  or 'all' for every snippet)
                               --ignore-changes    skip remote dirty check
-                            Default: interactive fzf multi-select.
+                            Default for --keys/--ssh: interactive fzf.
 EOF
 }
 
 case "${1:-}" in
     init)              shift; cmd_init "$@" ;;
+    check)             shift; cmd_check "$@" ;;
     deploy)            shift; cmd_deploy "$@" ;;
     -h|--help|help|"") usage ;;
     *) log "ERROR" "unknown command: $1"; usage; exit 1 ;;
