@@ -19,8 +19,8 @@ add_to_path() {
     export PATH="$new_path"
 }
 
-if [ -f `dirname $0`/commonrc.secrets ]; then
-    source `dirname $0`/commonrc.secrets
+if [ -f ~/bin/commonrc.secrets ]; then
+    source ~/bin/commonrc.secrets
 fi
 
 if [ -x /usr/libexec/java_home ]; then
@@ -61,7 +61,7 @@ alias ll='ls -l -h'
 alias k='kubectl'
 alias dotfiles=~/dotfiles/dotfiles
 
-source `dirname $0`/z
+source ~/bin/z
 
 if [ -n "$ZSH_VERSION" ]; then
   precmd() { print -Pn "\e]0;%n@%m: %~\a"; }
@@ -188,3 +188,65 @@ fi
 
 # Source selector functions
 source ~/bin/selectors
+
+# claude — wrapper that picks a config profile before launching the CLI.
+# Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. The
+# "default" profile always maps to ~/.claude. Set CLAUDE_PROFILE to skip the
+# picker (e.g. CLAUDE_PROFILE=pp claude). Needs yq + fzf; without them, or with
+# a single profile, it just runs claude untouched.
+claude() {
+  local config="$HOME/.claude-profiles.yaml"
+  local -a names
+  local profile dir
+
+  if [ ! -f "$config" ] || ! command -v yq >/dev/null 2>&1; then
+    command claude "$@"
+    return
+  fi
+
+  # Collect profile names, making sure "default" is always present.
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  if [[ " ${names[*]} " != *" default "* ]]; then
+    names=(default "${names[@]}")
+  fi
+
+  # Nothing to choose between: run claude as-is.
+  if [ ${#names[@]} -le 1 ]; then
+    command claude "$@"
+    return
+  fi
+
+  if [ -n "$CLAUDE_PROFILE" ]; then
+    profile="$CLAUDE_PROFILE"
+  elif ! command -v fzf >/dev/null 2>&1; then
+    command claude "$@"
+    return
+  else
+    profile=$(for p in "${names[@]}"; do
+      if [ "$p" = "default" ]; then
+        echo "• $p"
+      else
+        echo "  $p"
+      fi
+    done | fzf --ansi --no-sort --no-mouse --prompt="Select Claude profile > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+    [ -z "$profile" ] && return 1
+  fi
+
+  # Resolve the config dir for the chosen profile.
+  dir=$(yq -r ".[] | select(.name == \"$profile\") | .dir" "$config" 2>/dev/null)
+  if [ -z "$dir" ] || [ "$dir" = "null" ]; then
+    if [ "$profile" = "default" ]; then
+      dir="$HOME/.claude"
+    else
+      echo "⚠️  Unknown Claude profile: $profile" >&2
+      return 1
+    fi
+  fi
+
+  # Expand a leading ~ and strip the trailing slash.
+  dir="${dir/#\~/$HOME}"
+  dir="${dir%/}"
+
+  echo "🤖 Claude profile: $profile ($dir)" >&2
+  CLAUDE_CONFIG_DIR="$dir" command claude "$@"
+}
