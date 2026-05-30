@@ -232,15 +232,20 @@ claude() {
     [ -z "$profile" ] && return 1
   fi
 
+  # The default profile is native: leave CLAUDE_CONFIG_DIR unset so claude
+  # uses ~/.claude.json (setting it to ~/.claude would read ~/.claude/.claude.json
+  # instead, a different and empty config).
+  if [ "$profile" = "default" ]; then
+    echo "🤖 Claude profile: default" >&2
+    command claude "$@"
+    return
+  fi
+
   # Resolve the config dir for the chosen profile.
   dir=$(yq -r ".[] | select(.name == \"$profile\") | .dir" "$config" 2>/dev/null)
   if [ -z "$dir" ] || [ "$dir" = "null" ]; then
-    if [ "$profile" = "default" ]; then
-      dir="$HOME/.claude"
-    else
-      echo "⚠️  Unknown Claude profile: $profile" >&2
-      return 1
-    fi
+    echo "⚠️  Unknown Claude profile: $profile" >&2
+    return 1
   fi
 
   # Expand a leading ~ and strip the trailing slash.
