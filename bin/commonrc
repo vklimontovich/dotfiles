@@ -189,17 +189,32 @@ fi
 # Source selector functions
 source ~/bin/selectors
 
+# _claude_dep_banner — warn that a profile-picker dependency is missing.
+_claude_dep_banner() {
+  local dep="$1" hint="$2"
+  echo "⚠️  Claude profiles need '$dep', which isn't installed — running the default profile." >&2
+  echo "    Install it: $hint" >&2
+}
+
 # claude — wrapper that picks a config profile before launching the CLI.
 # Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. The
 # "default" profile always maps to ~/.claude. Set CLAUDE_PROFILE to skip the
-# picker (e.g. CLAUDE_PROFILE=pp claude). Needs yq + fzf; without them, or with
-# a single profile, it just runs claude untouched.
+# picker (e.g. CLAUDE_PROFILE=pp claude). Needs yq + fzf; if profiles are
+# configured but a dep is missing it prints a banner and runs the default.
 claude() {
   local config="$HOME/.claude-profiles.yaml"
   local -a names
   local profile dir
 
-  if [ ! -f "$config" ] || ! command -v yq >/dev/null 2>&1; then
+  # No profiles configured: run claude untouched, no noise.
+  if [ ! -f "$config" ]; then
+    command claude "$@"
+    return
+  fi
+
+  # yq reads the profiles; without it the picker can't work.
+  if ! command -v yq >/dev/null 2>&1; then
+    _claude_dep_banner yq "brew install yq"
     command claude "$@"
     return
   fi
@@ -219,6 +234,7 @@ claude() {
   if [ -n "$CLAUDE_PROFILE" ]; then
     profile="$CLAUDE_PROFILE"
   elif ! command -v fzf >/dev/null 2>&1; then
+    _claude_dep_banner fzf "brew install fzf"
     command claude "$@"
     return
   else
