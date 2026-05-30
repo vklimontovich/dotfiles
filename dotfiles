@@ -122,81 +122,6 @@ cmd_check() {
     fi
 }
 
-# Rewrite the dotfiles-managed Include block in ~/.ssh/config to reference
-# whatever snippets currently exist in ~/.ssh/conf.d/. Idempotent: re-runs
-# produce no diff if nothing changed.
-ensure_ssh_includes_block() {
-    local config="$HOME/.ssh/config"
-    local confd="$HOME/.ssh/conf.d"
-    local begin="# >>> dotfiles ssh-includes (managed) >>>"
-    local end="# <<< dotfiles ssh-includes (managed) <<<"
-
-    local body=""
-    if [ -d "$confd" ]; then
-        local f name
-        for f in "$confd"/*; do
-            [ -e "$f" ] || continue
-            name="$(basename "$f")"
-            body="${body}Include ~/.ssh/conf.d/${name}"$'\n'
-        done
-    fi
-
-    mkdir -p "$HOME/.ssh"
-    chmod 700 "$HOME/.ssh"
-
-    local tmp
-    tmp="$(mktemp "${config}.XXXXXX")"
-
-    if [ -e "$config" ]; then
-        local in_block=0 replaced=0 line last
-        while IFS= read -r line || [ -n "$line" ]; do
-            if [ "$in_block" -eq 0 ] && [ "$line" = "$begin" ]; then
-                in_block=1
-                printf '%s\n%s%s\n' "$begin" "$body" "$end" >> "$tmp"
-                replaced=1
-                continue
-            fi
-            if [ "$in_block" -eq 1 ]; then
-                [ "$line" = "$end" ] && in_block=0
-                continue
-            fi
-            printf '%s\n' "$line" >> "$tmp"
-        done < "$config"
-
-        if [ "$replaced" -eq 0 ]; then
-            if [ -s "$tmp" ]; then
-                last=$(tail -c 1 "$tmp")
-                [ -n "$last" ] && printf '\n' >> "$tmp"
-            fi
-            printf '%s\n%s%s\n' "$begin" "$body" "$end" >> "$tmp"
-        fi
-    else
-        printf '%s\n%s%s\n' "$begin" "$body" "$end" > "$tmp"
-    fi
-
-    if [ -e "$config" ] && cmp -s "$config" "$tmp"; then
-        rm "$tmp"
-        log "OK" "$config (managed block unchanged)"
-    else
-        mv "$tmp" "$config"
-        chmod 600 "$config"
-        log "WRITE" "$config (managed block updated)"
-    fi
-}
-
-link_ssh_conf_d() {
-    if [ -d "$DIR/ssh/conf.d" ]; then
-        local f name
-        for f in "$DIR"/ssh/conf.d/*; do
-            [ -f "$f" ] || continue
-            name="$(basename "$f")"
-            do_link "$DIR/ssh/conf.d/$name" "$HOME/.ssh/conf.d/$name"
-        done
-    fi
-    clean_stale_in "$HOME/.ssh/conf.d"
-    ensure_ssh_includes_block
-}
-
 cmd_init() {
     link_rel "bin"
     link_rel ".bash_profile"
@@ -222,8 +147,6 @@ cmd_init() {
     fi
 
     clean_stale_in "$HOME/.claude/skills"
-
-    link_ssh_conf_d
 }
 
 # Discover ssh key pairs (private + matching .pub) in ~/.ssh.
@@ -238,67 +161,6 @@ list_ssh_key_pairs() {
         [ -f "$priv" ] || continue
         basename "$priv"
     done
-}
-
-# List ssh config snippet names available in the repo.
-list_ssh_snippets() {
-    local conf_d="$DIR/ssh/conf.d"
-    [ -d "$conf_d" ] || return 0
-    local f
-    for f in "$conf_d"/*; do
-        [ -f "$f" ] || continue
-        basename "$f"
-    done
-}
-
-# Resolve user selection of snippets (interactive fzf if csv is empty,
-# explicit list otherwise). Prints one snippet name per line on stdout.
-pick_ssh_snippets() {
-    local ssh_csv="$1"
-    local -a snippets=()
-    while IFS= read -r line; do
-        [ -n "$line" ] && snippets+=("$line")
-    done < <(list_ssh_snippets)
-
-    [ ${#snippets[@]} -eq 0 ] && return 0
-
-    if [ "$ssh_csv" = "all" ]; then
-        printf '%s\n' "${snippets[@]}"
-        return 0
-    fi
-
-    if [ -n "$ssh_csv" ]; then
-        local IFS=','
-        local -a names
-        read -ra names <<< "$ssh_csv"
-        printf '%s\n' "${names[@]}"
-        return 0
-    fi
-
-    if ! command -v fzf >/dev/null 2>&1; then
-        log "ERROR" "fzf not installed; pass --ssh all or --no-ssh" >&2
-        return 1
-    fi
-    local picked
-    picked="$({ printf '<all>\n'; printf '%s\n' "${snippets[@]}"; } | fzf --multi --no-mouse \
-        --prompt='Select SSH config snippets to deploy (TAB to multi-select) > ' \
-        --height=~30 --reverse)" || true
-    [ -z "$picked" ] && return 0
-
-    local has_all=0
-    local -a selected=()
-    while IFS= read -r line; do
-        if [ "$line" = "<all>" ]; then
-            has_all=1
-        else
-            selected+=("$line")
-        fi
-    done <<< "$picked"
-    if [ "$has_all" -eq 1 ]; then
-        printf '%s\n' "${snippets[@]}"
-    else
-        printf '%s\n' "${selected[@]}"
-    fi
 }
 
 deploy_ssh_keys() {
@@ -459,12 +321,43 @@ ensure_ssh_access() {
     return 1
 }
 
+# Copy the local ssh config to a remote as-is: ~/.ssh/config plus the conf.d
+# snippets it includes. No git tracking, no managed block — just scp the files.
+deploy_ssh_config() {
+    local server="$1"
+    local ssh_dir="$HOME/.ssh"
+
+    local -a files=()
+    [ -f "$ssh_dir/config" ] && files+=("$ssh_dir/config")
+    local f
+    for f in "$ssh_dir"/conf.d/*; do
+        [ -f "$f" ] && files+=("$f")
+    done
+
+    if [ ${#files[@]} -eq 0 ]; then
+        log "INFO" "no ssh config to deploy in $ssh_dir; skipping"
+        return 0
+    fi
+
+    log "REMOTE" "ensuring ~/.ssh/conf.d exists on $server"
+    ssh "$server" 'mkdir -p ~/.ssh/conf.d && chmod 700 ~/.ssh ~/.ssh/conf.d'
+
+    log "SCP" "ssh config -> $server:~/.ssh/"
+    [ -f "$ssh_dir/config" ] && scp -q "$ssh_dir/config" "$server:.ssh/config"
+    if compgen -G "$ssh_dir/conf.d/*" >/dev/null; then
+        scp -q "$ssh_dir"/conf.d/* "$server:.ssh/conf.d/"
+    fi
+
+    ssh "$server" 'chmod 600 ~/.ssh/config ~/.ssh/conf.d/* 2>/dev/null; true'
+    log "OK" "ssh config deployed to $server"
+}
+
 cmd_deploy() {
     local server=""
     local no_keys=0
     local keys_csv=""
     local no_ssh=0
-    local ssh_csv=""
+    local force_ssh=0
     local ignore_changes=0
 
     while [ $# -gt 0 ]; do
@@ -473,8 +366,7 @@ cmd_deploy() {
             --keys)           keys_csv="${2:-}"; shift 2 ;;
             --keys=*)         keys_csv="${1#*=}"; shift ;;
             --no-ssh)         no_ssh=1; shift ;;
-            --ssh)            ssh_csv="${2:-}"; shift 2 ;;
-            --ssh=*)          ssh_csv="${1#*=}"; shift ;;
+            --ssh)            force_ssh=1; shift ;;
             --ignore-changes) ignore_changes=1; shift ;;
             -*) log "ERROR" "unknown flag: $1"; return 1 ;;
             *)
@@ -490,7 +382,7 @@ cmd_deploy() {
     done
 
     if [ -z "$server" ]; then
-        log "ERROR" "usage: dotfiles deploy <server> [--no-keys | --keys k1,k2,...] [--no-ssh | --ssh all|n1,n2,...]"
+        log "ERROR" "usage: dotfiles deploy <server> [--no-keys | --keys k1,k2,...] [--no-ssh | --ssh]"
         return 1
     fi
 
@@ -499,7 +391,7 @@ cmd_deploy() {
         return 1
     fi
 
-    if [ "$no_ssh" -eq 1 ] && [ -n "$ssh_csv" ]; then
+    if [ "$no_ssh" -eq 1 ] && [ "$force_ssh" -eq 1 ]; then
         log "ERROR" "--no-ssh and --ssh are mutually exclusive"
         return 1
     fi
@@ -528,50 +420,8 @@ cmd_deploy() {
         fi
     fi
 
-    local -a ssh_selection=()
-    if [ "$no_ssh" -eq 1 ]; then
-        log "SKIP" "ssh config snippets (--no-ssh)"
-    else
-        while IFS= read -r line; do
-            [ -n "$line" ] && ssh_selection+=("$line")
-        done < <(pick_ssh_snippets "$ssh_csv")
-
-        local name
-        for name in "${ssh_selection[@]}"; do
-            if [ ! -f "$DIR/ssh/conf.d/$name" ]; then
-                log "ERROR" "ssh snippet not found: $DIR/ssh/conf.d/$name"
-                return 1
-            fi
-        done
-    fi
-
-    if [ ${#ssh_selection[@]} -gt 0 ]; then
-        log "RSYNC" "$DIR/ -> $server:~/dotfiles/ (ssh snippets: ${ssh_selection[*]})"
-    else
-        log "RSYNC" "$DIR/ -> $server:~/dotfiles/ (no ssh snippets)"
-    fi
+    log "RSYNC" "$DIR/ -> $server:~/dotfiles/"
     rsync -az --no-owner --no-group --delete --exclude='.DS_Store' "$DIR/" "$server:dotfiles/"
-
-    # Apple's openrsync rejects --delete-excluded over ssh, so we transfer all
-    # snippets above and prune the unselected ones on the remote ourselves.
-    local keep_str=" ${ssh_selection[*]} "
-    local -a prune=()
-    while IFS= read -r name; do
-        [ -z "$name" ] && continue
-        case "$keep_str" in
-            *" $name "*) ;;
-            *) prune+=("$name") ;;
-        esac
-    done < <(list_ssh_snippets)
-
-    if [ ${#prune[@]} -gt 0 ]; then
-        local quoted=""
-        for name in "${prune[@]}"; do
-            quoted+=" $(printf '%q' "$name")"
-        done
-        log "PRUNE" "ssh snippets on $server: ${prune[*]}"
-        ssh "$server" "cd ~/dotfiles/ssh/conf.d && rm -f --$quoted"
-    fi
 
     log "REMOTE" "running 'dotfiles init' on $server"
     ssh "$server" '~/dotfiles/dotfiles init'
@@ -580,6 +430,14 @@ cmd_deploy() {
         log "SKIP" "ssh key copy (--no-keys)"
     else
         deploy_ssh_keys "$server" "$keys_csv"
+    fi
+
+    if [ "$no_ssh" -eq 1 ]; then
+        log "SKIP" "ssh config (--no-ssh)"
+    elif [ "$force_ssh" -eq 1 ] || confirm "Deploy ssh config (~/.ssh/config + conf.d) to $server?"; then
+        deploy_ssh_config "$server"
+    else
+        log "SKIP" "ssh config (declined)"
     fi
 
     log "CHECK" "local environment"
@@ -608,12 +466,13 @@ Commands:
                               --keys k1,k2,...    copy these key pairs
                                                   (base names in ~/.ssh,
                                                   or 'all' for every pair)
-                              --no-ssh            skip all ssh/conf.d snippets
-                              --ssh n1,n2,...     deploy these snippets
-                                                  (names in ssh/conf.d,
-                                                  or 'all' for every snippet)
+                              --no-ssh            skip ssh config copy
+                              --ssh               copy ssh config without
+                                                  asking (scp ~/.ssh/config
+                                                  + conf.d to the remote)
                               --ignore-changes    skip remote dirty check
-                            Default for --keys/--ssh: interactive fzf.
+                            Default for --keys: interactive fzf.
+                            Default for ssh config: ask (y/n).
 EOF
 }
 
