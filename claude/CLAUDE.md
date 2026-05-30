@@ -51,3 +51,13 @@ Summary: concise, simple words, short sentences, no metaphors. Reference: Paul G
 If you have playwright MCP prefere it over Chrome usage. Run playwright in headless mode so the window won't open.
 The only reason to use Chrome would be if you should rely on pre-existing login session that exists in Chrome. In this case,
 double check with me via question tool and always tell where and how I should login
+
+
+# Access to services
+
+Prefer this to access services over MCP (if credentials files exists)
+
+ - Google Drive: ~/.gdrive-credentials.json. This is for accessing @klimontovich.com, @jitsu.com and @grossmargin.com accounts
+ - Slack:  ~/.slack-credentials.json. For accessing jitsucom.slack.com workspace
+
+ For accessing gmail, use Superhuman MCP if it's available, next preference is ~/.gdrive-credentials.json and the last resort is Gmail MCP
