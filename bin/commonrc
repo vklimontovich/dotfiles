@@ -196,11 +196,69 @@ _claude_dep_banner() {
   echo "    Install it: $hint" >&2
 }
 
+# Resolve a claude profile name to its config dir. "default" maps to ~/.claude;
+# anything else is looked up in ~/.claude-profiles.yaml. Prints nothing and
+# returns 1 if the name is unknown.
+_claude_profile_dir() {
+  local config="$HOME/.claude-profiles.yaml" dir
+  if [ "$1" = "default" ]; then
+    echo "$HOME/.claude"
+    return 0
+  fi
+  dir=$(yq -r ".[] | select(.name == \"$1\") | .dir" "$config" 2>/dev/null)
+  [ -z "$dir" ] || [ "$dir" = "null" ] && return 1
+  dir="${dir/#\~/$HOME}"
+  echo "${dir%/}"
+}
+
+# Print a tab-separated table of claude profiles (header + one row per profile),
+# with "default" always first. Plan, billing, and account are read straight from
+# each profile's <dir>/.claude.json oauthAccount — no need to launch claude.
+# Billing is "metered" when the account bills per token, else "flat".
+_claude_profiles_table() {
+  local config="$HOME/.claude-profiles.yaml"
+  local -a names
+  local n d disp j email plan billing
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  printf 'PROFILE\tPLAN\tBILLING\tACCOUNT\tDIR\n'
+  for n in default "${names[@]}"; do
+    [ "$n" = "default" ] && [ -n "$_seen_default" ] && continue
+    [ "$n" = "default" ] && _seen_default=1
+    d=$(_claude_profile_dir "$n") || continue
+    j="$d/.claude.json"; [ "$n" = "default" ] && j="$HOME/.claude.json"
+    disp="$d"; case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
+    email="-"; plan="-"; billing="-"
+    if [ -f "$j" ]; then
+      email=$(jq -r '.oauthAccount.emailAddress // "-"' "$j" 2>/dev/null)
+      plan=$(jq -r '.oauthAccount.organizationRateLimitTier // "-"
+                    | sub("^default_";"") | sub("^claude_";"") | sub("^raven_";"")
+                    | gsub("_";" ")' "$j" 2>/dev/null)
+      billing=$(jq -r '.oauthAccount
+                    | if ((.seatTier // "")|test("usage")) or ((.billingType // "")|test("usage"))
+                      then "metered" else "flat" end' "$j" 2>/dev/null)
+      [ -z "$plan" ] && plan="-"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$plan" "$billing" "$email" "$disp"
+  done
+  unset _seen_default
+}
+
+# claude-profiles — print the profile table without launching anything.
+claude-profiles() {
+  if ! command -v yq >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "claude-profiles needs yq and jq — run: brew install yq jq" >&2
+    return 1
+  fi
+  [ -f "$HOME/.claude-profiles.yaml" ] || { echo "No ~/.claude-profiles.yaml" >&2; return 1; }
+  _claude_profiles_table | column -t -s $'\t'
+}
+
 # claude — wrapper that picks a config profile before launching the CLI.
 # Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. The
-# "default" profile always maps to ~/.claude. Set CLAUDE_PROFILE to skip the
-# picker (e.g. CLAUDE_PROFILE=pp claude). Needs yq + fzf; if profiles are
-# configured but a dep is missing it prints a banner and runs the default.
+# "default" profile always maps to ~/.claude and is always listed first. Set
+# CLAUDE_PROFILE to skip the picker (e.g. CLAUDE_PROFILE=pp claude). Needs
+# yq + fzf + jq; if a dep is missing it prints a banner and runs the default.
+# The picker shows each profile's plan, billing mode, account, and config dir.
 claude() {
   local config="$HOME/.claude-profiles.yaml"
   local -a names
@@ -218,14 +276,17 @@ claude() {
     command claude "$@"
     return
   fi
+  if ! command -v jq >/dev/null 2>&1; then
+    _claude_dep_banner jq "brew install jq"
+    command claude "$@"
+    return
+  fi
 
-  # Collect profile names, making sure "default" is always present.
+  # Count distinct profiles (default is always available, even if not listed).
   names=($(yq -r '.[].name' "$config" 2>/dev/null))
   if [[ " ${names[*]} " != *" default "* ]]; then
     names=(default "${names[@]}")
   fi
-
-  # Nothing to choose between: run claude as-is.
   if [ ${#names[@]} -le 1 ]; then
     command claude "$@"
     return
@@ -238,13 +299,10 @@ claude() {
     command claude "$@"
     return
   else
-    profile=$(for p in "${names[@]}"; do
-      if [ "$p" = "default" ]; then
-        echo "• $p"
-      else
-        echo "  $p"
-      fi
-    done | fzf --ansi --no-sort --no-mouse --prompt="Select Claude profile > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+    profile=$(_claude_profiles_table | column -t -s $'\t' |
+      fzf --ansi --no-sort --no-mouse --header-lines=1 \
+          --prompt="Select Claude profile > " --height=~30 --reverse |
+      awk '{print $1}')
     [ -z "$profile" ] && return 1
   fi
 
@@ -257,16 +315,11 @@ claude() {
     return
   fi
 
-  # Resolve the config dir for the chosen profile.
-  dir=$(yq -r ".[] | select(.name == \"$profile\") | .dir" "$config" 2>/dev/null)
-  if [ -z "$dir" ] || [ "$dir" = "null" ]; then
+  dir=$(_claude_profile_dir "$profile")
+  if [ -z "$dir" ]; then
     echo "⚠️  Unknown Claude profile: $profile" >&2
     return 1
   fi
-
-  # Expand a leading ~ and strip the trailing slash.
-  dir="${dir/#\~/$HOME}"
-  dir="${dir%/}"
 
   echo "🤖 Claude profile: $profile ($dir)" >&2
   CLAUDE_CONFIG_DIR="$dir" command claude "$@"
