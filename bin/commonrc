@@ -52,6 +52,7 @@ add_to_path \
     ~/.bun \
     ~/.cargo/bin \
     "$CONFLUENT_HOME/bin" \
+    ~/.krew/bin \
     ~/.local/bin
 
 alias pnpm='ding pnpm'
