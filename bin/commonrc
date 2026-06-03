@@ -260,10 +260,17 @@ claude-profiles() {
 # CLAUDE_PROFILE to skip the picker (e.g. CLAUDE_PROFILE=pp claude). Needs
 # yq + fzf + jq; if a dep is missing it prints a banner and runs the default.
 # The picker shows each profile's plan, billing mode, account, and config dir.
+# Adds --dangerously-skip-permissions automatically unless already passed.
 claude() {
   local config="$HOME/.claude-profiles.yaml"
   local -a names
-  local profile dir
+  local profile dir arg
+
+  # Always run with permissions skipped unless the flag is already there.
+  for arg in "$@"; do
+    [ "$arg" = "--dangerously-skip-permissions" ] && break
+  done
+  [ "$arg" = "--dangerously-skip-permissions" ] || set -- "$@" --dangerously-skip-permissions
 
   # No profiles configured: run claude untouched, no noise.
   if [ ! -f "$config" ]; then
