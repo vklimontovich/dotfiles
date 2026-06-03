@@ -1,0 +1,94 @@
+{
+  "$schema": "https://raw.githubusercontent.com/manaflow-ai/cmux/main/web/data/cmux.schema.json",
+  "schemaVersion": 1,
+
+  // I only use cmux to run Claude Code (plain terminal lives in Ghostty + Zellij).
+  // So both "new" entrypoints launch claude with --dangerously-skip-permissions:
+  //   cmd+t  -> new TAB (surface) running claude, in the current workspace
+  //   cmd+n  -> new WORKSPACE (sidebar entry) running claude
+  "actions": {
+    // Override the built-in new-terminal action so cmd+t opens a claude tab.
+    "cmux.newTerminal": {
+      "type": "command",
+      "title": "Claude Code",
+      "subtitle": "New tab running Claude Code",
+      "command": "claude --dangerously-skip-permissions",
+      "target": "newTabInCurrentPane",
+      "shortcut": "cmd+t",
+      "icon": { "type": "symbol", "name": "sparkles" }
+    },
+
+    // Backs the new-workspace button / cmd+n via ui.newWorkspace.action below.
+    "claude-workspace": {
+      "type": "workspaceCommand",
+      "title": "Claude Code",
+      "subtitle": "New workspace running Claude Code",
+      "commandName": "Claude Code",
+      "icon": { "type": "symbol", "name": "sparkles" }
+    }
+  },
+
+  "ui": {
+    "newWorkspace": {
+      "action": "claude-workspace"
+    },
+    // Internal browser is disabled, so drop its button from the tab bar.
+    "surfaceTabBar": {
+      "buttons": ["cmux.newTerminal", "cmux.splitRight", "cmux.splitDown"]
+    }
+  },
+
+  "commands": [
+    {
+      "name": "Claude Code",
+      "description": "New workspace running Claude Code in the current directory",
+      "keywords": ["claude", "cc", "agent"],
+      "workspace": {
+        "name": "Claude",
+        "cwd": ".",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "type": "terminal",
+                "name": "Claude",
+                "command": "claude --dangerously-skip-permissions",
+                "focus": true
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+
+  // Disable the embedded browser: open clicked links and `open <url>` in the
+  // system browser instead of cmux's internal one.
+  "browser": {
+    "openTerminalLinksInCmuxBrowser": false,
+    "interceptTerminalOpenCommandInCmuxBrowser": false
+  },
+
+  // Match my Zellij / Ghostty muscle memory.
+  // cmd+t (new tab) and cmd+w (close tab) already match cmux defaults.
+  //   cmd+opt + arrows  -> navigation
+  //     left / right  -> previous / next tab (surface) within a workspace
+  //     up   / down   -> previous / next workspace (sidebar)
+  //   ctrl+opt + arrows -> focus pane in that direction (splits)
+  "shortcuts": {
+    "bindings": {
+      "prevSurface": "cmd+opt+left",
+      "nextSurface": "cmd+opt+right",
+      "prevSidebarTab": "cmd+opt+up",
+      "nextSidebarTab": "cmd+opt+down",
+      "focusLeft": "ctrl+opt+left",
+      "focusRight": "ctrl+opt+right",
+      "focusUp": "ctrl+opt+up",
+      "focusDown": "ctrl+opt+down",
+      // Internal browser disabled — unbind its entry-point shortcuts.
+      "openBrowser": "none",
+      "splitBrowserRight": "none",
+      "splitBrowserDown": "none"
+    }
+  }
+}
