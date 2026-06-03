@@ -75,14 +75,14 @@
     ]
   },
   "alwaysThinkingEnabled": true,
+  "effortLevel": "high",
   "skipDangerousModePermissionPrompt": true,
-  "theme": "dark-ansi",
+  "theme": "auto",
   "verbose": true,
   "preferredNotifChannel": "iterm2",
   "remoteControlAtStartup": true,
   "skipAutoPermissionPrompt": true,
   "feedbackSurveyState": {
     "lastShownTime": 1753994697574
-  },
-  "effortLevel": "high"
+  }
 }

@@ -131,6 +131,7 @@ cmd_init() {
     link_rel ".config/zellij/config.kdl"
     link_rel ".config/zellij/layouts"
     link_rel ".config/ghostty/config"
+    link_rel ".config/cmux/cmux.json"
     link_rel ".config/nvim"
 
     do_link "$DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
