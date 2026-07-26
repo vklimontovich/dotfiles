@@ -28,6 +28,9 @@ What I actually use day-to-day, and where to look in the repo.
 - **[Claude Code](https://claude.com/claude-code)** — coding agent. Global
   config: `claude/CLAUDE.md` (instructions), `claude/settings.json` (perms,
   hooks, theme).
+- **[Git](https://git-scm.com/)** — `.gitconfig` (identity, LFS, Kaleidoscope
+  diff/merge), `.gitignore_global`, and `.config/git/ignore`. Machine paths use
+  `~` so the same config works on Linux remotes.
 
 ## Other tools
 
