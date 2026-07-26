@@ -61,6 +61,7 @@
     ],
     "defaultMode": "auto"
   },
+  "model": "claude-opus-4-8[1m]",
   "hooks": {
     "Notification": [
       {
@@ -76,11 +77,14 @@
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
+  "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
   "theme": "auto",
   "verbose": true,
   "preferredNotifChannel": "iterm2",
   "remoteControlAtStartup": true,
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
   "feedbackSurveyState": {
     "lastShownTime": 1753994697574
