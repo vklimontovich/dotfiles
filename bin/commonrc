@@ -198,8 +198,9 @@ _claude_dep_banner() {
 }
 
 # Resolve a claude profile name to its config dir. "default" maps to ~/.claude;
-# anything else is looked up in ~/.claude-profiles.yaml. Prints nothing and
-# returns 1 if the name is unknown.
+# anything else is looked up in ~/.claude-profiles.yaml. An entry may use
+# "dir: default" to alias the default profile under another name. Prints
+# nothing and returns 1 if the name is unknown.
 _claude_profile_dir() {
   local config="$HOME/.claude-profiles.yaml" dir
   if [ "$1" = "default" ]; then
@@ -208,13 +209,18 @@ _claude_profile_dir() {
   fi
   dir=$(yq -r ".[] | select(.name == \"$1\") | .dir" "$config" 2>/dev/null)
   [ -z "$dir" ] || [ "$dir" = "null" ] && return 1
+  if [ "$dir" = "default" ]; then
+    echo "$HOME/.claude"
+    return 0
+  fi
   dir="${dir/#\~/$HOME}"
   echo "${dir%/}"
 }
 
-# Print a tab-separated table of claude profiles (header + one row per profile),
-# with "default" always first. Plan, billing, and account are read straight from
-# each profile's <dir>/.claude.json oauthAccount — no need to launch claude.
+# Print a tab-separated table of claude profiles (header + one row per profile).
+# Plan, billing, and account are read straight from each profile's
+# <dir>/.claude.json oauthAccount — no need to launch claude. A profile whose
+# dir is ~/.claude is native, so its config is ~/.claude.json instead.
 # Billing is "metered" when the account bills per token, else "flat".
 _claude_profiles_table() {
   local config="$HOME/.claude-profiles.yaml"
@@ -222,11 +228,9 @@ _claude_profiles_table() {
   local n d disp j email plan billing
   names=($(yq -r '.[].name' "$config" 2>/dev/null))
   printf 'PROFILE\tPLAN\tBILLING\tACCOUNT\tDIR\n'
-  for n in default "${names[@]}"; do
-    [ "$n" = "default" ] && [ -n "$_seen_default" ] && continue
-    [ "$n" = "default" ] && _seen_default=1
+  for n in "${names[@]}"; do
     d=$(_claude_profile_dir "$n") || continue
-    j="$d/.claude.json"; [ "$n" = "default" ] && j="$HOME/.claude.json"
+    j="$d/.claude.json"; [ "$d" = "$HOME/.claude" ] && j="$HOME/.claude.json"
     disp="$d"; case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
     email="-"; plan="-"; billing="-"
     if [ -f "$j" ]; then
@@ -241,7 +245,6 @@ _claude_profiles_table() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$plan" "$billing" "$email" "$disp"
   done
-  unset _seen_default
 }
 
 # claude-profiles — print the profile table without launching anything.
@@ -255,22 +258,28 @@ claude-profiles() {
 }
 
 # claude — wrapper that picks a config profile before launching the CLI.
-# Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. The
-# "default" profile always maps to ~/.claude and is always listed first. Set
+# Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. A dir
+# of ~/.claude runs claude natively (CLAUDE_CONFIG_DIR stays unset). Set
 # CLAUDE_PROFILE to skip the picker (e.g. CLAUDE_PROFILE=pp claude). Needs
-# yq + fzf + jq; if a dep is missing it prints a banner and runs the default.
+# yq + fzf + jq; if a dep is missing it prints a banner and runs claude as-is.
 # The picker shows each profile's plan, billing mode, account, and config dir.
-# Adds --dangerously-skip-permissions automatically unless already passed.
+# Adds --dangerously-skip-permissions when launching a session (no args, flags
+# like -r, or a prompt) — but not for subcommands, which don't accept it.
 claude() {
   local config="$HOME/.claude-profiles.yaml"
   local -a names
   local profile dir arg
 
-  # Always run with permissions skipped unless the flag is already there.
-  for arg in "$@"; do
-    [ "$arg" = "--dangerously-skip-permissions" ] && break
-  done
-  [ "$arg" = "--dangerously-skip-permissions" ] || set -- "$@" --dangerously-skip-permissions
+  # Skip permission prompts for sessions; subcommands reject the flag.
+  case "$1" in
+    agents|auth|auto-mode|config|doctor|gateway|install|mcp|migrate-installer|plugin|plugins|project|setup-token|ultrareview|update|upgrade) ;;
+    *)
+      for arg in "$@"; do
+        [ "$arg" = "--dangerously-skip-permissions" ] && break
+      done
+      [ "$arg" = "--dangerously-skip-permissions" ] || set -- "$@" --dangerously-skip-permissions
+      ;;
+  esac
 
   # No profiles configured: run claude untouched, no noise.
   if [ ! -f "$config" ]; then
@@ -290,18 +299,16 @@ claude() {
     return
   fi
 
-  # Count distinct profiles (default is always available, even if not listed).
   names=($(yq -r '.[].name' "$config" 2>/dev/null))
-  if [[ " ${names[*]} " != *" default "* ]]; then
-    names=(default "${names[@]}")
-  fi
-  if [ ${#names[@]} -le 1 ]; then
+  if [ ${#names[@]} -eq 0 ]; then
     command claude "$@"
     return
   fi
 
   if [ -n "$CLAUDE_PROFILE" ]; then
     profile="$CLAUDE_PROFILE"
+  elif [ ${#names[@]} -eq 1 ]; then
+    profile="${names[@]:0:1}"
   elif ! command -v fzf >/dev/null 2>&1; then
     _claude_dep_banner fzf "brew install fzf"
     command claude "$@"
@@ -314,19 +321,19 @@ claude() {
     [ -z "$profile" ] && return 1
   fi
 
-  # The default profile is native: leave CLAUDE_CONFIG_DIR unset so claude
-  # uses ~/.claude.json (setting it to ~/.claude would read ~/.claude/.claude.json
-  # instead, a different and empty config).
-  if [ "$profile" = "default" ]; then
-    echo "🤖 Claude profile: default" >&2
-    command claude "$@"
-    return
-  fi
-
   dir=$(_claude_profile_dir "$profile")
   if [ -z "$dir" ]; then
     echo "⚠️  Unknown Claude profile: $profile" >&2
     return 1
+  fi
+
+  # ~/.claude is claude's native home: leave CLAUDE_CONFIG_DIR unset so it
+  # reads ~/.claude.json (pointing CLAUDE_CONFIG_DIR at ~/.claude would read
+  # ~/.claude/.claude.json instead, a different and empty config).
+  if [ "$dir" = "$HOME/.claude" ]; then
+    echo "🤖 Claude profile: $profile" >&2
+    command claude "$@"
+    return
   fi
 
   echo "🤖 Claude profile: $profile ($dir)" >&2
