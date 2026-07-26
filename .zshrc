@@ -152,3 +152,7 @@ source ~/bin/commonrc-post
 if [[ -n "$ZELLIJ" ]]; then
   ssh() { TERM=xterm-256color command ssh "$@"; }
 fi
+
+# Machine-local overrides (untracked). Deliberate per-machine config goes here;
+# installer PATH lines usually land in the ~/.zshrc stub instead.
+[ -f ~/.zshrc.local ] && source ~/.zshrc.local

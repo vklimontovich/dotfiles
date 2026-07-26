@@ -75,6 +75,46 @@ do_link() {
 # Symlink a path that lives at the same relative location under $DIR and $HOME.
 link_rel() { do_link "$DIR/$1" "$HOME/$1"; }
 
+# Ensure $HOME/<rel> is a REAL file that sources the tracked copy, instead of a
+# symlink into the repo. Dumb installers that append to it (yc, scott, nvm, ...)
+# then scribble into an untracked file, so the repo never goes dirty. Idempotent:
+# once the stub sources us it's left alone, preserving whatever got appended.
+ensure_source_stub() {
+    local rel="$1"
+    local src="$DIR/$rel"
+    local dst="$HOME/$rel"
+    local disp="$src"
+    case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
+    local line="source $disp"
+
+    if [ ! -e "$src" ]; then
+        log "ERROR" "source missing: $src"
+        return 1
+    fi
+
+    if [ -f "$dst" ] && [ ! -L "$dst" ] && grep -qF "$line" "$dst" 2>/dev/null; then
+        log "OK" "$dst (stub sources $disp)"
+        return 0
+    fi
+
+    if [ -L "$dst" ]; then
+        log "UNLINK" "$dst (was symlink -> $(readlink "$dst"))"
+        unlink "$dst"
+    elif [ -e "$dst" ]; then
+        local backup="$dst.bak.$(rand_str)"
+        log "BACKUP" "$dst -> $backup (did not source $disp)"
+        mv "$dst" "$backup"
+    fi
+
+    log "STUB" "$dst -> sources $disp"
+    {
+        printf '# Managed stub written by `dotfiles init`.\n'
+        printf '# Real config is version-controlled in %s.\n' "$disp"
+        printf '# This file is NOT tracked, so installers may append below safely.\n\n'
+        printf '%s\n' "$line"
+    } > "$dst"
+}
+
 # Remove symlinks in $1 that point into $DIR but whose target no longer exists.
 clean_stale_in() {
     local target_dir="$1"
@@ -125,7 +165,7 @@ cmd_check() {
 cmd_init() {
     link_rel "bin"
     link_rel ".bash_profile"
-    link_rel ".zshrc"
+    ensure_source_stub ".zshrc"
     link_rel ".bashrc"
     link_rel ".inputrc"
     link_rel ".gitconfig"

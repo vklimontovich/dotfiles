@@ -17,7 +17,10 @@ What I actually use day-to-day, and where to look in the repo.
   cwd. Also doubles as a manual rename: `tn my-tab`).
 - **[Zsh](https://www.zsh.org/) + [oh-my-zsh](https://ohmyz.sh/)** — shell.
   Entry: `.zshrc`. Cross-shell config: `bin/commonrc` (also sourced from
-  `.bashrc`). What's custom on top of stock oh-my-zsh:
+  `.bashrc`). `~/.zshrc` is a real (untracked) stub that sources this tracked
+  `.zshrc`, so installers appending to it don't dirty the repo; deliberate
+  per-machine config goes in `~/.zshrc.local`, sourced at the end. What's custom
+  on top of stock oh-my-zsh:
     - Custom two-line prompt `intheloop` (in `bin/commonrc-post`):
       `[user@host] cwd (git)` on the left; venv, AWS profile, k8s context,
       last-command time, exit status on the right.
