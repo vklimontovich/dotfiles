@@ -1,0 +1,168 @@
+#!/usr/bin/env bun
+// dff — render a git diff as a Pierre (@pierre/diffs) page and open it in the browser.
+//
+// Standalone:   dff [git-diff args]              e.g. dff origin/main...HEAD, dff HEAD~1 -- src/
+// External:     GIT_EXTERNAL_DIFF=dff git diff   git calls dff once per file; the page opens
+//                                                after the last file (uses GIT_DIFF_PATH_COUNTER)
+// Flags / env:  --unified (or DFF_STYLE=unified) stacked instead of split view
+//               DFF_NO_OPEN=1                    print the html path instead of opening it
+//
+// Zero-install: resolved by bun auto-install; falls back to a one-time
+// `bun add @pierre/diffs` into ~/.cache/dff.
+
+import { mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const HOME = process.env.HOME ?? "~";
+
+// Resolve the SSR entry + the library's shadow-DOM stylesheet (style.js exports
+// the CSS string the diff UI needs; it lives next to dist/ssr/index.js).
+async function loadDiffs() {
+  const fromDist = async distSsrUrl => {
+    const ssr = await import(distSsrUrl);
+    const style = (await import(new URL("../style.js", distSsrUrl).href)).default;
+    return { ssr, style };
+  };
+  try {
+    await import("@pierre/diffs/ssr");
+    return await fromDist(import.meta.resolve("@pierre/diffs/ssr"));
+  } catch {
+    const cache = join(HOME, ".cache", "dff");
+    const entry = join(cache, "node_modules", "@pierre", "diffs", "dist", "ssr", "index.js");
+    if (!existsSync(entry)) {
+      console.error("dff: installing @pierre/diffs into ~/.cache/dff (first run)...");
+      mkdirSync(cache, { recursive: true });
+      await Bun.write(join(cache, "package.json"), JSON.stringify({ name: "dff-cache", private: true }));
+      const r = Bun.spawnSync(["bun", "add", "@pierre/diffs"], { cwd: cache, stdout: "inherit", stderr: "inherit" });
+      if (r.exitCode !== 0) throw new Error("dff: failed to install @pierre/diffs");
+    }
+    return await fromDist(Bun.pathToFileURL(entry).href);
+  }
+}
+
+const DIFF_OPTIONS = {
+  theme: { light: "github-light", dark: "github-dark" },
+  diffStyle: process.env.DFF_STYLE === "unified" ? "unified" : "split",
+};
+
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// The library styles its markup via `:host`, so each file's prerendered HTML has
+// to live in its own shadow root. We use a declarative shadow root (parsed by
+// the browser, no JS) and inline the library stylesheet inside it.
+let LIB_CSS = "";
+const shadowFile = prerenderedHTML =>
+  `<diffs-container class="dff-file"><template shadowrootmode="open"><style>${LIB_CSS}</style>${prerenderedHTML}</template></diffs-container>`;
+
+const note = text => `<div class="dff-note">${esc(text)}</div>`;
+
+function page(title, subtitle, bodyHTML) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>${esc(title)}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; background: #fff; color: #1c2128;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  @media (prefers-color-scheme: dark) { body { background: #0d1117; color: #e6edf3; } }
+  .dff-wrap { max-width: 1600px; margin: 0 auto; padding: 24px 20px 80px; }
+  .dff-head { margin: 0 0 4px; font-size: 17px; font-weight: 650; }
+  .dff-sub { margin: 0 0 24px; font-size: 13px; opacity: .6;
+    font-family: ui-monospace, Menlo, monospace; }
+  .dff-file { display: block; margin-bottom: 16px; }
+  .dff-note { padding: 10px 14px; border: 1px solid #8883; border-radius: 8px; font-size: 13px;
+    font-family: ui-monospace, Menlo, monospace; opacity: .75; }
+</style>
+</head>
+<body><div class="dff-wrap">
+<h1 class="dff-head">${esc(title)}</h1>
+<p class="dff-sub">${esc(subtitle)}</p>
+${bodyHTML}
+</div></body></html>`;
+}
+
+async function emit(title, subtitle, bodyHTML) {
+  const out = join(tmpdir(), `dff-${Date.now()}.html`);
+  await Bun.write(out, page(title, subtitle, bodyHTML));
+  if (process.env.DFF_NO_OPEN) {
+    console.log(out);
+  } else {
+    Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", out]);
+  }
+}
+
+const isBinary = s => s.includes("\0");
+const readMaybe = p => (!p || p === "/dev/null" ? "" : readFileSync(p, "latin1"));
+
+// ─── GIT_EXTERNAL_DIFF mode ──────────────────────────────────────────────────
+// git calls: dff <path> <old-file> <old-hex> <old-mode> <new-file> <new-hex> <new-mode>
+//            [<new-path> <similarity>]   (renames)  |  dff <path>  (unmerged)
+async function externalDiffMode(args) {
+  const counter = Number(process.env.GIT_DIFF_PATH_COUNTER);
+  const total = Number(process.env.GIT_DIFF_PATH_TOTAL);
+  const session = join(tmpdir(), `dff-session-${process.ppid}`);
+  mkdirSync(session, { recursive: true });
+
+  const entry =
+    args.length < 7
+      ? { path: args[0], unmerged: true }
+      : { path: args[0], newPath: args[7], old: readMaybe(args[1]), new: readMaybe(args[4]) };
+  await Bun.write(join(session, `${String(counter).padStart(6, "0")}.json`), JSON.stringify(entry));
+  if (counter !== total) return;
+
+  const { ssr, style } = await loadDiffs();
+  LIB_CSS = style;
+  const parts = [];
+  for (const f of readdirSync(session).sort()) {
+    const e = JSON.parse(readFileSync(join(session, f), "utf8"));
+    const name = e.newPath ?? e.path;
+    if (e.unmerged) {
+      parts.push(note(`${e.path} — unmerged`));
+    } else if (isBinary(e.old) || isBinary(e.new)) {
+      parts.push(note(`${name} — binary file differs`));
+    } else {
+      const r = await ssr.preloadMultiFileDiff({
+        oldFile: { name: e.path, contents: e.old },
+        newFile: { name, contents: e.new },
+        options: DIFF_OPTIONS,
+      });
+      parts.push(shadowFile(r.prerenderedHTML));
+    }
+  }
+  Bun.spawnSync(["rm", "-rf", session]);
+  await emit("git diff", `${total} file${total === 1 ? "" : "s"} · rendered by @pierre/diffs`, parts.join("\n"));
+}
+
+// ─── standalone mode ─────────────────────────────────────────────────────────
+async function standaloneMode(args) {
+  if (args.includes("--unified")) DIFF_OPTIONS.diffStyle = "unified";
+  const rest = args.filter(a => a !== "--unified");
+  const git = ["git", "diff", "--no-ext-diff", "--no-color", ...rest];
+  const proc = Bun.spawnSync(git, { stdout: "pipe", stderr: "inherit", maxBuffer: 512 * 1024 * 1024 });
+  if (proc.exitCode !== 0 && proc.exitCode !== 1) process.exit(proc.exitCode ?? 1);
+  const patch = proc.stdout.toString();
+  if (!patch.trim()) {
+    console.log("dff: no changes");
+    return;
+  }
+  const stat = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--shortstat", ...rest], { stdout: "pipe" })
+    .stdout.toString()
+    .trim();
+  const { ssr, style } = await loadDiffs();
+  LIB_CSS = style;
+  const files = await ssr.preloadPatchFile({ patch, options: DIFF_OPTIONS });
+  const body = files.map(f => shadowFile(f.prerenderedHTML)).join("\n");
+  await emit(`git diff ${rest.join(" ")}`.trim(), `${stat} · rendered by @pierre/diffs`, body);
+}
+
+const args = process.argv.slice(2);
+if (process.env.GIT_DIFF_PATH_COUNTER) {
+  await externalDiffMode(args);
+} else {
+  await standaloneMode(args);
+}

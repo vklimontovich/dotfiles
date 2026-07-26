@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+  bold="$(tput bold)"
+  dim="$(tput dim)"
+  red="$(tput setaf 1)"
+  green="$(tput setaf 2)"
+  yellow="$(tput setaf 3)"
+  blue="$(tput setaf 4)"
+  magenta="$(tput setaf 5)"
+  cyan="$(tput setaf 6)"
+  reset="$(tput sgr0)"
+else
+  bold=""
+  dim=""
+  red=""
+  green=""
+  yellow=""
+  blue=""
+  magenta=""
+  cyan=""
+  reset=""
+fi
+
+bar_width=18
+metric_indent="    "
+
+note() {
+  printf "%b\n" "${yellow}⚠ $*${reset}"
+}
+
+die() {
+  printf "%b\n" "${red}✖ $*${reset}" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+${bold}wifi-check${reset} - explain and grade the current macOS Wi-Fi link
+
+Usage:
+  sudo wifi-check
+  sudo wifi-check --channels
+
+Why sudo:
+  Modern macOS hides useful Wi-Fi diagnostics such as RSSI, noise, MCS and
+  Tx Rate from normal users. This script uses Apple's wdutil info.
+EOF
+}
+
+show_channels=0
+for arg in "$@"; do
+  case "${arg}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --channels)
+      show_channels=1
+      ;;
+    *)
+      die "Unknown argument: ${arg}"
+      ;;
+  esac
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  usage
+  echo
+  note "Run it with sudo to read current Wi-Fi diagnostics:"
+  printf "  %bsudo %s%b\n" "${cyan}" "$0" "${reset}"
+  exit 1
+fi
+
+command -v wdutil >/dev/null 2>&1 || die "wdutil was not found. This script is intended for macOS."
+
+raw="$(wdutil info 2>&1 || true)"
+if grep -qiE 'usage:|AuthorizationCreate|not permitted|operation not permitted' <<<"${raw}"; then
+  die "Could not read Wi-Fi info from wdutil. Try running from Terminal as: sudo $0"
+fi
+
+trim() {
+  local s="${1:-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf "%s" "$s"
+}
+
+first_value() {
+  local key="$1"
+  awk -v key="$key" '
+    function clean(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    BEGIN { wanted = tolower(key) }
+    {
+      line = $0
+      pos = match(line, /[:=]/)
+      if (!pos) next
+      field = clean(substr(line, 1, pos - 1))
+      if (tolower(field) == wanted) {
+        print clean(substr(line, pos + 1))
+        exit
+      }
+    }
+  ' <<<"${raw}" | sed 's/[[:space:]]*$//'
+}
+
+value_matching() {
+  local key_regex="$1"
+  awk -v key_regex="$key_regex" '
+    function clean(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    BEGIN { IGNORECASE = 1 }
+    {
+      line = $0
+      pos = match(line, /[:=]/)
+      if (!pos) next
+      field = clean(substr(line, 1, pos - 1))
+      if (field ~ key_regex) {
+        print clean(substr(line, pos + 1))
+        exit
+      }
+    }
+  ' <<<"${raw}" | sed 's/[[:space:]]*$//'
+}
+
+first_existing_value() {
+  local value
+  for key in "$@"; do
+    value="$(first_value "$key")"
+    if [[ -n "${value}" ]]; then
+      printf "%s" "${value}"
+      return 0
+    fi
+  done
+}
+
+first_number() {
+  local key="$1"
+  first_value "$key" | grep -Eo -- '-?[0-9]+([.][0-9]+)?' | head -1 || true
+}
+
+ssid="$(first_existing_value "SSID" "Network Name")"
+bssid="$(first_existing_value "BSSID" "AP MAC")"
+iface="$(first_existing_value "Interface Name" "Interface")"
+security="$(first_value "Security")"
+channel="$(first_value "Channel")"
+country="$(first_value "Country Code")"
+phy="$(first_value "PHY Mode")"
+rssi="$(value_matching "RSSI|Signal" | grep -Eo -- '-?[0-9]+([.][0-9]+)?' | head -1 || true)"
+noise="$(first_number "Noise")"
+tx_rate="$(value_matching "Tx Rate|Transmit Rate|Last Tx Rate" | grep -Eo -- '-?[0-9]+([.][0-9]+)?' | head -1 || true)"
+mcs="$(first_number "MCS Index")"
+nss="$(first_number "NSS")"
+channel_busy="$(value_matching "Channel Utilization|Channel Busy|CCA Busy|CCA|Busy" | grep -Eo -- '[0-9]+([.][0-9]+)?' | head -1 || true)"
+default_route="$(route -n get default 2>/dev/null || true)"
+
+if [[ -z "${iface}" ]]; then
+  iface="$(awk '/interface:/ { print $2; exit }' <<<"${default_route}")"
+fi
+
+if [[ -n "${iface}" && ( -z "${ssid}" || "${ssid}" == "<redacted>" ) ]] && command -v networksetup >/dev/null 2>&1; then
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    ssid_fallback="$(sudo -u "${SUDO_USER}" networksetup -getairportnetwork "${iface}" 2>/dev/null | sed 's/^Current Wi-Fi Network: //')"
+  else
+    ssid_fallback="$(networksetup -getairportnetwork "${iface}" 2>/dev/null | sed 's/^Current Wi-Fi Network: //')"
+  fi
+  if [[ -n "${ssid_fallback}" && "${ssid_fallback}" != *"not associated"* && "${ssid_fallback}" != *"You are not associated"* ]]; then
+    ssid="${ssid_fallback}"
+  fi
+fi
+
+if [[ "${nss:-}" == "0" ]]; then
+  nss=""
+fi
+if [[ "${mcs:-}" == "0" && -z "${nss}" ]]; then
+  mcs=""
+fi
+
+ip_addr=""
+router_ip=""
+if [[ -n "${iface}" ]]; then
+  ip_addr="$(ipconfig getifaddr "${iface}" 2>/dev/null || true)"
+  router_ip="$(ipconfig getoption "${iface}" router 2>/dev/null || true)"
+  if [[ -z "${router_ip}" || ! "${router_ip}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    router_ip="$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" { print $2; exit }')"
+  fi
+  if [[ -z "${router_ip}" || ! "${router_ip}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    router_ip="$(awk '/gateway:/ && $2 ~ /^[0-9]+(\.[0-9]+){3}$/ { print $2; exit }' <<<"${default_route}")"
+  fi
+fi
+
+if [[ -z "${ssid}${bssid}${rssi}${noise}${tx_rate}" ]]; then
+  printf "%s\n" "${raw}"
+  die "wdutil output did not include current Wi-Fi link metrics. Is Wi-Fi connected?"
+fi
+
+score_label() {
+  local score="$1"
+  if (( score >= 85 )); then
+    printf "%b" "${green}excellent${reset}"
+  elif (( score >= 70 )); then
+    printf "%b" "${green}good${reset}"
+  elif (( score >= 55 )); then
+    printf "%b" "${yellow}usable${reset}"
+  elif (( score >= 40 )); then
+    printf "%b" "${yellow}weak${reset}"
+  else
+    printf "%b" "${red}poor${reset}"
+  fi
+}
+
+grade_rssi() {
+  local v="$1"
+  if (( v >= -50 )); then echo 95
+  elif (( v >= -60 )); then echo 82
+  elif (( v >= -67 )); then echo 68
+  elif (( v >= -70 )); then echo 55
+  elif (( v >= -75 )); then echo 38
+  else echo 20
+  fi
+}
+
+grade_snr() {
+  local v="$1"
+  if (( v >= 40 )); then echo 95
+  elif (( v >= 30 )); then echo 82
+  elif (( v >= 25 )); then echo 68
+  elif (( v >= 20 )); then echo 55
+  elif (( v >= 15 )); then echo 38
+  else echo 20
+  fi
+}
+
+grade_mcs() {
+  local v="${1%.*}"
+  if (( v >= 9 )); then echo 95
+  elif (( v >= 7 )); then echo 80
+  elif (( v >= 5 )); then echo 65
+  elif (( v >= 3 )); then echo 50
+  elif (( v >= 1 )); then echo 35
+  else echo 20
+  fi
+}
+
+grade_channel_busy() {
+  local v="${1%.*}"
+  if (( v <= 20 )); then echo 90
+  elif (( v <= 40 )); then echo 75
+  elif (( v <= 60 )); then echo 55
+  elif (( v <= 80 )); then echo 35
+  else echo 15
+  fi
+}
+
+make_bar() {
+  local score="$1"
+  local filled=$(( score * bar_width / 100 ))
+  local empty=$(( bar_width - filled ))
+  local color="${red}"
+  (( score >= 70 )) && color="${green}"
+  (( score >= 40 && score < 70 )) && color="${yellow}"
+
+  printf "%b[" "${color}"
+  printf "%0.s█" $(seq 1 "$filled" 2>/dev/null || true)
+  printf "%0.s░" $(seq 1 "$empty" 2>/dev/null || true)
+  printf "]%b %3d/100" "${reset}" "$score"
+}
+
+print_metric() {
+  local emoji="$1"
+  local name="$2"
+  local value="$3"
+  local score="$4"
+  local meaning="$5"
+  local refs="$6"
+
+  printf "\n%s  %b%s%b: %s\n" "$emoji" "${bold}" "$name" "${reset}" "${value:-unknown}"
+  printf "%s%s  %s\n" "${metric_indent}" "$(make_bar "$score")" "$(score_label "$score")"
+  printf "%s%b%s%b\n" "${metric_indent}" "${dim}" "$meaning" "${reset}"
+  printf "%s%bRef:%b %s\n" "${metric_indent}" "${dim}" "${reset}" "$refs"
+}
+
+print_info() {
+  local emoji="$1"
+  local name="$2"
+  local value="$3"
+  local note="$4"
+
+  printf "\n%s  %b%s%b: %s\n" "$emoji" "${bold}" "$name" "${reset}" "${value:-unknown}"
+  printf "%s%b%s%b\n" "${metric_indent}" "${dim}" "$note" "${reset}"
+}
+
+scan_channels() {
+  command -v swift >/dev/null 2>&1 || {
+    note "Channel scan needs /usr/bin/swift and CoreWLAN."
+    return 0
+  }
+
+  local scan_raw
+  scan_raw="$(
+    swift - 2>/dev/null <<'SWIFT' || true
+import CoreWLAN
+import Foundation
+
+let client = CWWiFiClient.shared()
+guard let iface = client.interface() else {
+  exit(2)
+}
+
+do {
+  let networks = try iface.scanForNetworks(withSSID: nil)
+  for network in networks {
+    let ssid = network.ssid ?? "<hidden>"
+    let bssid = network.bssid ?? ""
+    let rssi = network.rssiValue
+    let channel = network.wlanChannel?.channelNumber ?? 0
+    var band = "unknown"
+    if let wlanChannel = network.wlanChannel {
+      switch wlanChannel.channelBand {
+      case .band2GHz:
+        band = "2.4GHz"
+      case .band5GHz:
+        band = "5GHz"
+      case .band6GHz:
+        band = "6GHz"
+      default:
+        band = "unknown"
+      }
+    }
+    print("\(band)\t\(channel)\t\(rssi)\t\(ssid)\t\(bssid)")
+  }
+} catch {
+  exit(3)
+}
+SWIFT
+  )"
+
+  printf "\n%b\n" "${bold}${magenta}Channel scan${reset}"
+  if [[ -z "${scan_raw}" ]]; then
+    printf "    %bCould not scan nearby networks via CoreWLAN. macOS may require Location/Wi-Fi privacy permission for Terminal.%b\n" "${yellow}" "${reset}"
+    return 0
+  fi
+
+  printf "    %bEstimated from visible nearby networks, not real airtime utilization. Least busy first.%b\n\n" "${dim}" "${reset}"
+  printf "    %-7s %-7s %-4s %-9s %-10s %s\n" "Band" "Channel" "APs" "Strongest" "Estimate" "Load"
+
+  awk -F '\t' -v green="${green}" -v yellow="${yellow}" -v red="${red}" -v reset="${reset}" '
+    function weight(rssi) {
+      if (rssi >= -50) return 100
+      if (rssi >= -60) return 70
+      if (rssi >= -70) return 40
+      if (rssi >= -80) return 15
+      return 5
+    }
+    function label(score) {
+      if (score <= 20) return green "quiet" reset
+      if (score <= 45) return green "fine" reset
+      if (score <= 75) return yellow "busy" reset
+      return red "crowded" reset
+    }
+    function bar(score,   i, out, filled) {
+      if (score > 100) score = 100
+      filled = int(score * 12 / 100 + 0.5)
+      out = "["
+      for (i = 1; i <= 12; i++) out = out (i <= filled ? "█" : "░")
+      return out "]"
+    }
+    $2 ~ /^[0-9]+$/ && $2 > 0 {
+      key = $1 SUBSEP $2
+      count[key]++
+      load[key] += weight($3)
+      if (!(key in strongest) || $3 > strongest[key]) strongest[key] = $3
+      band[key] = $1
+      channel[key] = $2
+    }
+    END {
+      for (key in count) {
+        score = load[key]
+        if (score > 100) score = 100
+        printf "%03d\t    %-7s %-7s %-4d %-9s %-10s %s %3d/100\n",
+          score, band[key], channel[key], count[key], strongest[key] " dBm", label(score), bar(score), score
+      }
+    }
+  ' <<<"${scan_raw}" | sort -n | cut -f2-
+
+  printf "\n    %bLower estimate is better. Prefer 5/6 GHz for speed when signal is good; use 2.4 GHz for range.%b\n" "${dim}" "${reset}"
+}
+
+snr=""
+if [[ -n "${rssi}" && -n "${noise}" ]]; then
+  snr=$(( rssi - noise ))
+fi
+
+rssi_score=0
+snr_score=0
+tx_score=0
+mcs_score=0
+
+[[ -n "${rssi}" ]] && rssi_score="$(grade_rssi "${rssi}")"
+[[ -n "${snr}" ]] && snr_score="$(grade_snr "${snr}")"
+[[ -n "${mcs}" ]] && mcs_score="$(grade_mcs "${mcs}")"
+
+count=0
+total=0
+for s in "$rssi_score" "$snr_score" "$mcs_score"; do
+  if (( s > 0 )); then
+    total=$(( total + s ))
+    count=$(( count + 1 ))
+  fi
+done
+overall=0
+(( count > 0 )) && overall=$(( total / count ))
+
+band="unknown"
+width="unknown"
+channel_number="unknown"
+if grep -qi '6[[:space:]]*GHz' <<<"${channel}"; then
+  band="6 GHz"
+elif grep -qiE '5[[:space:]]*GHz|5g' <<<"${channel}"; then
+  band="5 GHz"
+elif grep -qiE '2\.4[[:space:]]*GHz|2g|2\.4g' <<<"${channel}"; then
+  band="2.4 GHz"
+fi
+if [[ "${channel}" =~ ([0-9]+)[[:space:]]*MHz ]]; then
+  width="${BASH_REMATCH[1]} MHz"
+elif [[ "${channel}" =~ /([0-9]+) ]]; then
+  width="${BASH_REMATCH[1]} MHz"
+fi
+if [[ "${channel}" =~ [256](g|G)([0-9]+) ]]; then
+  channel_number="${BASH_REMATCH[2]}"
+elif [[ "${channel}" =~ ^[[:space:]]*([0-9]+) ]]; then
+  channel_number="${BASH_REMATCH[1]}"
+fi
+printf "%b %s (%s)\n\n" "${bold}${blue}📶  Wi-Fi Check${reset}" "$(make_bar "$overall")" "$(score_label "$overall")"
+printf "    %b\n" "${bold}Current link${reset}"
+printf "       SSID: %s  BSSID: %s\n" "${ssid:-unknown}" "${bssid:-unknown}"
+printf "       Iface: %s  IP: %s  Router: %s\n" "${iface:-unknown}" "${ip_addr:-unknown}" "${router_ip:-unknown}"
+printf "       Security: %s  Channel: %s\n" "${security:-unknown}" "${channel_number}"
+printf "       Band: %s  Width: %s  PHY: %s  Country: %s  Raw channel: %s\n" "${band}" "${width}" "${phy:-unknown}" "${country:-unknown}" "${channel:-unknown}"
+
+print_metric "📡" "RSSI / signal strength" "${rssi:+${rssi} dBm}" "$rssi_score" \
+  "How loudly your Mac hears the AP; less negative is better." \
+  "-30..-50 excellent, -60 good, -67 okay for calls, -70 weak, -75+ bad."
+
+if [[ -n "${noise}" ]]; then
+  noise_score=70
+  (( noise <= -95 )) && noise_score=90
+  (( noise > -90 )) && noise_score=55
+  (( noise > -85 )) && noise_score=35
+  print_metric "🌫" "Noise floor" "${noise} dBm" "$noise_score" \
+    "Background RF noise; more negative is quieter." \
+    "-95 dBm or lower is quiet, -90 okay, above -85 noisy."
+fi
+
+if [[ -n "${snr}" ]]; then
+  print_metric "🎚" "SNR / signal-to-noise ratio" "${snr} dB" "$snr_score" \
+    "RSSI minus noise; a strong stability indicator." \
+    "40+ excellent, 30+ good, 25 okay, 20 weak, below 15 poor."
+fi
+
+print_info "🚀" "Tx Rate" "${tx_rate:+${tx_rate} Mbps}" \
+  "Current Wi-Fi link speed. Real internet/download speed is usually lower."
+
+if [[ -n "${mcs}" ]]; then
+  print_metric "🧬" "MCS Index" "${mcs}" "$mcs_score" \
+    "Modulation/coding level; higher means cleaner signal." \
+    "9-11 excellent, 7-8 good, 5-6 okay, 3-4 weak, 0-2 poor."
+else
+  print_info "🧬" "MCS Index" "unknown" \
+    "wdutil did not expose a reliable current MCS value for this link."
+fi
+
+if [[ -n "${nss}" ]]; then
+  nss_score=45
+  (( ${nss%.*} >= 2 )) && nss_score=75
+  (( ${nss%.*} >= 3 )) && nss_score=90
+  print_metric "🧵" "NSS / spatial streams" "${nss}" "$nss_score" \
+    "Active antenna streams for this link." \
+    "1 is basic, 2 is common/good, 3-4 is high-end and device-dependent."
+fi
+
+print_info "🛣️" "Channel / band / width" "${channel_number}, ${band}, ${width}" \
+  "Channel number plus band/width. Wider channels can be faster, but are more sensitive to interference."
+
+if [[ -n "${channel_busy}" ]]; then
+  channel_busy_score="$(grade_channel_busy "${channel_busy}")"
+  print_metric "📊" "Current channel busy" "${channel_busy}%" "$channel_busy_score" \
+    "How much airtime is already used on channel ${channel_number}; lower is better." \
+    "0-20% quiet, 20-40% fine, 40-60% busy, 60-80% crowded, 80%+ bad."
+else
+  print_info "📊" "Current channel busy" "unknown" \
+    "Current macOS/wdutil output did not expose channel utilization. Channel is shown above."
+fi
+
+printf "\n%b\n" "${bold}${magenta}Quick read${reset}"
+
+if (( overall >= 70 )); then
+  printf "  ✅ Link looks healthy for normal use.\n"
+elif (( overall >= 55 )); then
+  printf "  🟡 Link is usable, but speed/latency may vary.\n"
+else
+  printf "  🔴 Link is weak. Move closer, reduce walls/metal/water, or use wired backhaul.\n"
+fi
+
+if [[ "${band}" == "2.4 GHz" ]]; then
+  printf "  ℹ️  2.4 GHz = better range, lower speed, more neighbor interference.\n"
+elif [[ "${band}" == "5 GHz" ]]; then
+  printf "  ℹ️  5 GHz = good balance, walls hurt more than 2.4 GHz.\n"
+elif [[ "${band}" == "6 GHz" ]]; then
+  printf "  ℹ️  6 GHz = high speed potential, short range, very wall-sensitive.\n"
+fi
+
+if [[ -n "${rssi}" && "${rssi}" -le -70 ]]; then
+  printf "  ℹ️  RSSI is weak. Try line-of-sight placement or move the AP/node closer.\n"
+fi
+if [[ -n "${tx_rate}" && "${tx_rate%.*}" -lt 150 ]]; then
+  printf "  ℹ️  Tx Rate is low. Real speed can be much lower than this number.\n"
+fi
+
+if (( show_channels == 1 )); then
+  scan_channels
+fi

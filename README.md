@@ -39,6 +39,12 @@ Small helpers in `bin/`:
 - `selectors` — fzf-driven pickers, sourced from `commonrc`:
   `ap` (AWS profile), `kk` (kubectl context), `kn` (kubectl namespace).
 - `idea`, `mate` — open files from the shell in IntelliJ / VS Code.
+- `dff` — render a `git diff` as a Pierre HTML page and open it in the browser.
+  Works standalone (`dff origin/main...HEAD`) or as `GIT_EXTERNAL_DIFF=dff git diff`.
+  Zero-install: resolved via bun auto-install. Needs [bun](https://bun.sh/).
+- `wifi-check` — explain and grade the current macOS Wi-Fi link (RSSI, SNR, MCS,
+  channel busy) from `wdutil info`. Run with `sudo`; `--channels` scans nearby
+  networks via CoreWLAN.
 - `dotfiles` — install + deploy script (`dotfiles init`, `dotfiles deploy <host>`).
 
 ## Install
