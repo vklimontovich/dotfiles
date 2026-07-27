@@ -176,21 +176,6 @@ cmd_init() {
     link_rel ".config/ghostty/config"
     link_rel ".config/cmux/cmux.json"
     link_rel ".config/nvim"
-
-    do_link "$DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
-    do_link "$DIR/claude/settings.json" "$HOME/.claude/settings.json"
-    do_link "$DIR/claude/docs"          "$HOME/.claude/docs"
-
-    if [ -d "$DIR/claude/skills" ]; then
-        for skill in "$DIR"/claude/skills/*/; do
-            [ -d "$skill" ] || continue
-            local name
-            name="$(basename "$skill")"
-            do_link "$DIR/claude/skills/$name" "$HOME/.claude/skills/$name"
-        done
-    fi
-
-    clean_stale_in "$HOME/.claude/skills"
 }
 
 # Discover ssh key pairs (private + matching .pub) in ~/.ssh.
@@ -490,6 +475,89 @@ cmd_deploy() {
     ssh "$server" '~/dotfiles/dotfiles check'
 }
 
+# The instruction block that points a CLAUDE.md at the shared agent instructions.
+_agents_ref_block() {
+    cat <<'EOF'
+# Instructions
+
+First, load `~/agents/AGENTS.md` and follow it.
+EOF
+}
+
+# Clone/update ~/agents and reference it from every Claude profile's CLAUDE.md.
+cmd_agents() {
+    local repo="git@github.com:vklimontovich/agents.git"
+    local dest="$HOME/agents"
+    local disp="$dest"
+    case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
+
+    # Step 1: clone or update the repo over SSH (auth assumed present).
+    if [ -d "$dest/.git" ]; then
+        if git -C "$dest" pull --ff-only >/dev/null 2>&1; then
+            log "PULL" "$disp updated"
+        else
+            log "ERROR" "git pull failed in $disp"
+            return 1
+        fi
+    elif [ -e "$dest" ]; then
+        log "ERROR" "$disp exists but is not a git repo"
+        return 1
+    else
+        if git clone "$repo" "$dest" >/dev/null 2>&1; then
+            log "CLONE" "$disp cloned"
+        else
+            log "ERROR" "git clone failed — check SSH auth to github.com ($repo)"
+            return 1
+        fi
+    fi
+
+    # Step 2: make each profile's CLAUDE.md load ~/agents/AGENTS.md.
+    local config="$HOME/.claude-profiles.yaml"
+    if ! command -v yq >/dev/null 2>&1; then
+        log "WARN" "yq not installed; skipping CLAUDE.md updates (brew install yq)"
+        return 0
+    fi
+    if [ ! -f "$config" ]; then
+        log "WARN" "no $config; skipping CLAUDE.md updates"
+        return 0
+    fi
+
+    # Collect profile dirs from the yaml, plus the native ~/.claude if it exists.
+    local -a dirs=()
+    local d have x
+    while IFS= read -r d; do
+        [ -z "$d" ] && continue
+        d="${d/#\~/$HOME}"; d="${d%/}"
+        [ "$d" = default ] && d="$HOME/.claude"
+        dirs+=("$d")
+    done < <(yq -r '.[].dir' "$config" 2>/dev/null)
+    if [ -d "$HOME/.claude" ]; then
+        have=0
+        for x in "${dirs[@]}"; do
+            if [ "$x" = "$HOME/.claude" ]; then have=1; fi
+        done
+        if [ "$have" -eq 0 ]; then dirs+=("$HOME/.claude"); fi
+    fi
+
+    local md mdisp tmp
+    for d in "${dirs[@]}"; do
+        md="$d/CLAUDE.md"
+        mdisp="$md"; case "$mdisp" in "$HOME"/*) mdisp="~${mdisp#$HOME}";; esac
+        if [ -f "$md" ] && grep -qF '~/agents/AGENTS.md' "$md"; then
+            log "SKIP" "$mdisp already references ~/agents/AGENTS.md"
+        elif [ ! -e "$md" ]; then
+            mkdir -p "$d"
+            _agents_ref_block > "$md"
+            log "CREATE" "$mdisp"
+        else
+            tmp="$md.$(rand_str).tmp"
+            { _agents_ref_block; echo; cat "$md"; } > "$tmp"
+            mv "$tmp" "$md"
+            log "INJECT" "$mdisp"
+        fi
+    done
+}
+
 usage() {
     cat <<EOF
 Usage: dotfiles <command>
@@ -497,6 +565,8 @@ Usage: dotfiles <command>
 Commands:
   init                      Symlink dotfiles into \$HOME (idempotent)
   check                     Print status: shell, zellij, oh-my-zsh, fzf
+  agents                    Clone/update ~/agents and reference it from each
+                            profile's CLAUDE.md (idempotent)
   deploy <server> [opts]    Rsync dotfiles to a remote and run init there.
                             <server> is an ssh target: a host alias or
                             user@host (e.g. jitsu005@jitsu005).
@@ -524,6 +594,7 @@ case "${1:-}" in
     init)              shift; cmd_init "$@" ;;
     check)             shift; cmd_check "$@" ;;
     deploy)            shift; cmd_deploy "$@" ;;
+    agents)            shift; cmd_agents "$@" ;;
     -h|--help|help|"") usage ;;
     *) log "ERROR" "unknown command: $1"; usage; exit 1 ;;
 esac
