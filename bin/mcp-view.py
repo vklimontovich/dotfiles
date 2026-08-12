@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "mcp>=2.0.0,<3",
+#   "textual>=1.0",
 # ]
 # ///
 """Connect to an MCP server (handling OAuth if required) and dump everything it exposes as JSON.
@@ -15,8 +16,20 @@ EXAMPLES
     mcp-view https://use.jitsu.com/mcp | jq -r '.tools[].name'
     mcp-view https://use.jitsu.com/mcp | jq '.tools[] | select(.name=="run_sync")'
 
-    mcp-view https://use.jitsu.com/mcp --show-auth      # cached credentials only
-    mcp-view https://use.jitsu.com/mcp --reauth         # forget them and start over
+    mcp-view https://use.jitsu.com/mcp --ui               # browse it in a terminal UI
+    mcp-view https://use.jitsu.com/mcp --show-auth        # cached credentials only
+    mcp-view https://use.jitsu.com/mcp --reauth           # forget them and start over
+
+TERMINAL UI
+    --ui opens a browser instead of printing: a filterable list of every tool,
+    prompt, resource and resource template on the left, full detail on the right —
+    description, annotation flags, every schema expanded property by property with
+    types, enums, constraints and required markers, nested objects and combinators
+    included, plus the entry's complete raw JSON underneath. Fields this tool has
+    never heard of are shown too, so a server extension is never silently dropped.
+
+      /  filter        r  raw JSON only     y  copy entry as JSON
+      e  expand all    q  quit              esc  clear the filter
 
 OUTPUT
     One JSON document on stdout; progress and errors on stderr, so `| jq` just works.
@@ -510,6 +523,359 @@ async def inspect_server(args: argparse.Namespace) -> dict[str, Any]:
                     return await describe(session, args)
 
 
+# --------------------------------------------------------------------------- tui
+
+TUI_CSS = """
+Screen { layers: base; }
+#body { height: 1fr; }
+#sidebar { width: 40; border-right: solid $panel-lighten-2; }
+#filter { border: none; background: $boost; padding: 0 1; height: 3; }
+#nav { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
+#detail-scroll { padding: 0 2 1 3; }
+#detail { width: 1fr; }
+"""
+
+
+def run_ui(doc: dict[str, Any]) -> int:
+    """Browse a fetched document in a Textual app.
+
+    Textual and rich are imported here rather than at module scope so the plain
+    CLI path does not pay for them.
+    """
+    from rich.console import Group
+    from rich.rule import Rule
+    from rich.syntax import Syntax
+    from rich.table import Table
+    from rich.text import Text
+    from rich.tree import Tree as RichTree
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.widgets import Footer, Header, Input, Static
+    from textual.widgets import Tree as NavTree
+
+    # JSON Schema keywords rendered inline on a property's own line.
+    INLINE = ("format", "pattern", "default", "const", "minimum", "maximum",
+              "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength",
+              "minItems", "maxItems", "uniqueItems", "multipleOf", "deprecated",
+              "readOnly", "writeOnly", "examples", "$comment")
+    # Keywords consumed by the renderer's own structure, so not "leftovers".
+    HANDLED = {"type", "properties", "required", "items", "prefixItems", "description",
+               "title", "enum", "$schema", "$id", "$ref", "$defs", "definitions",
+               "additionalProperties", "patternProperties", "oneOf", "anyOf", "allOf",
+               "not", *INLINE}
+
+    def type_label(schema: dict[str, Any]) -> str:
+        if ref := schema.get("$ref"):
+            return str(ref)
+        kind = schema.get("type")
+        if isinstance(kind, list):
+            return " | ".join(str(k) for k in kind)
+        if kind == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                return f"array<{type_label(items)}>"
+            return "array"
+        if kind:
+            return str(kind)
+        for combinator in ("oneOf", "anyOf", "allOf"):
+            if combinator in schema:
+                return combinator
+        if "enum" in schema:
+            return "enum"
+        if "properties" in schema:
+            return "object"
+        return "any"
+
+    def add_schema(parent: Any, label: str | None, schema: Any, required: bool = False) -> None:
+        """Render a schema node and everything hanging off it, recursively."""
+        if not isinstance(schema, dict):
+            parent.add(Text(f"{label}: {json.dumps(schema)}", style="dim"))
+            return
+
+        line = Text()
+        if label:
+            line.append(label, style="bold cyan")
+            if required:
+                line.append("*", style="bold red")
+            line.append("  ")
+        line.append(type_label(schema), style="italic yellow")
+        if enum := schema.get("enum"):
+            line.append("  ∈ " + ", ".join(json.dumps(e) for e in enum), style="magenta")
+        for key in INLINE:
+            if key in schema:
+                line.append(f"  {key}={json.dumps(schema[key])}", style="dim")
+        node = parent.add(line)
+
+        if desc := schema.get("description") or schema.get("title"):
+            node.add(Text(str(desc), style="italic dim"))
+
+        required_names = set(schema.get("required") or [])
+        for name, sub in (schema.get("properties") or {}).items():
+            add_schema(node, name, sub, name in required_names)
+        for name, sub in (schema.get("patternProperties") or {}).items():
+            add_schema(node, f"/{name}/", sub)
+        if isinstance(items := schema.get("items"), dict) and (
+            items.get("properties") or items.get("enum") or items.get("$ref")
+        ):
+            add_schema(node, "items", items)
+        for index, sub in enumerate(schema.get("prefixItems") or []):
+            add_schema(node, f"[{index}]", sub)
+        for combinator in ("oneOf", "anyOf", "allOf", "not"):
+            branch = schema.get(combinator)
+            for index, sub in enumerate(branch if isinstance(branch, list) else [branch] if branch else []):
+                add_schema(node, f"{combinator}[{index}]", sub)
+        extra = schema.get("additionalProperties")
+        if isinstance(extra, dict):
+            add_schema(node, "additionalProperties", extra)
+        elif extra is False:
+            node.add(Text("additionalProperties: false", style="dim"))
+        for name, sub in (schema.get("$defs") or schema.get("definitions") or {}).items():
+            add_schema(node, f"$defs/{name}", sub)
+
+        # Anything this renderer does not know about is still shown, verbatim.
+        for key, value in schema.items():
+            if key not in HANDLED:
+                node.add(Text(f"{key}: {json.dumps(value, default=str)}", style="dim"))
+
+    def schema_block(title: str, schema: Any) -> Any:
+        tree = RichTree(Text(title, style="bold"), guide_style="dim")
+        add_schema(tree, None, schema)
+        return tree
+
+    def add_json(parent: Any, label: str | None, value: Any) -> None:
+        """Plain JSON as a tree — for payloads that are not JSON Schema, like capabilities."""
+        head = Text()
+        if label is not None:
+            head.append(label, style="bold cyan")
+        if isinstance(value, dict):
+            if label is not None:
+                head.append("")
+            node = parent.add(head) if label is not None else parent
+            for key, sub in value.items():
+                add_json(node, key, sub)
+        elif isinstance(value, list):
+            node = parent.add(head) if label is not None else parent
+            for index, sub in enumerate(value):
+                add_json(node, f"[{index}]", sub)
+        else:
+            if label is not None:
+                head.append("  ")
+            head.append(json.dumps(value, default=str),
+                        style="magenta" if isinstance(value, bool) or value is None else "yellow"
+                        if not isinstance(value, str) else "green")
+            parent.add(head)
+
+    def json_block(title: str, value: Any) -> Any:
+        tree = RichTree(Text(title, style="bold"), guide_style="dim")
+        add_json(tree, None, value)
+        return tree
+
+    def kv_table(data: dict[str, Any]) -> Table:
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column(overflow="fold")
+        for key, value in data.items():
+            rendered = value if isinstance(value, str) else json.dumps(value, default=str)
+            table.add_row(key, rendered)
+        return table
+
+    def badges(item: dict[str, Any]) -> Text | None:
+        """Tool annotations, as flags — including any hint the spec adds later."""
+        line = Text()
+        known = {
+            "readOnlyHint": ("read-only", "green"),
+            "destructiveHint": ("destructive", "red"),
+            "idempotentHint": ("idempotent", "blue"),
+            "openWorldHint": ("open-world", "magenta"),
+        }
+        for key, value in (item.get("annotations") or {}).items():
+            if key in known:
+                label, style = known[key]
+                line.append(f" {label if value else 'not ' + label} ", style=f"reverse {style}" if value else "dim")
+            else:
+                line.append(f" {key}={json.dumps(value)} ", style="reverse yellow")
+            line.append(" ")
+        support = (item.get("execution") or {}).get("taskSupport")
+        if support:
+            line.append(f" task:{support} ", style="reverse cyan")
+        return line if len(line) else None
+
+    def render_detail(kind: str, item: dict[str, Any], raw_only: bool) -> Any:
+        """Everything about one entry: nothing in `item` is allowed to go unshown."""
+        parts: list[Any] = []
+        title = Text()
+        title.append(item.get("name") or item.get("uri") or item.get("uriTemplate") or kind, style="bold")
+        if (label := item.get("title")) and label != item.get("name"):
+            title.append(f"  {label}", style="dim")
+        parts += [title, Text()]
+
+        if not raw_only:
+            if flags := badges(item):
+                parts += [flags, Text()]
+            if desc := item.get("description"):
+                parts += [Text(str(desc)), Text()]
+
+            # Scalar fields, whatever they are, minus the ones rendered elsewhere.
+            structural = {"name", "title", "description", "annotations", "execution",
+                          "inputSchema", "outputSchema", "arguments"}
+            rest = {k: v for k, v in item.items() if k not in structural}
+            if rest:
+                parts += [Rule("fields", style="dim"), kv_table(rest), Text()]
+
+            for key, label in (("inputSchema", "input schema"), ("outputSchema", "output schema")):
+                if schema := item.get(key):
+                    parts += [Rule(label, style="dim"), schema_block(label, schema), Text()]
+
+            if args := item.get("arguments"):
+                parts.append(Rule("arguments", style="dim"))
+                table = Table.grid(padding=(0, 2))
+                table.add_column(style="bold cyan", no_wrap=True)
+                table.add_column(style="italic yellow", no_wrap=True)
+                table.add_column(overflow="fold")
+                for arg in args:
+                    known = {"name", "description", "required"}
+                    trailing = {k: v for k, v in arg.items() if k not in known}
+                    detail = str(arg.get("description", ""))
+                    if trailing:
+                        detail += f"  {json.dumps(trailing, default=str)}"
+                    table.add_row(arg.get("name", ""), "required" if arg.get("required") else "optional", detail)
+                parts += [table, Text()]
+
+        parts += [Rule("raw json", style="dim"),
+                  Syntax(json.dumps(item, indent=2, default=str), "json",
+                         theme="ansi_dark", background_color="default", word_wrap=True)]
+        return Group(*parts)
+
+    def render_server(raw_only: bool) -> Any:
+        overview = {k: v for k, v in doc.items()
+                    if k not in ("tools", "prompts", "resources", "resourceTemplates")}
+        if raw_only:
+            return Syntax(json.dumps(overview, indent=2, default=str), "json",
+                          theme="ansi_dark", background_color="default", word_wrap=True)
+        info = doc.get("serverInfo") or {}
+        parts: list[Any] = [
+            Text(f"{info.get('name', '?')}  {info.get('version', '')}", style="bold"),
+            Text(),
+            kv_table({k: v for k, v in overview.items() if k not in ("capabilities", "instructions")}),
+            Text(),
+            Rule("capabilities", style="dim"),
+            json_block("capabilities", doc.get("capabilities") or {}),
+            Text(),
+        ]
+        if instructions := doc.get("instructions"):
+            parts += [Rule("instructions", style="dim"), Text(str(instructions)), Text()]
+        counts = {k: len(doc[k]) if doc.get(k) is not None else "not offered"
+                  for k in ("tools", "prompts", "resources", "resourceTemplates")}
+        parts += [Rule("inventory", style="dim"), kv_table(counts)]
+        return Group(*parts)
+
+    SECTIONS = (("tools", "Tools"), ("prompts", "Prompts"),
+                ("resources", "Resources"), ("resourceTemplates", "Resource templates"))
+
+    def entry_label(item: dict[str, Any]) -> str:
+        return str(item.get("name") or item.get("uri") or item.get("uriTemplate") or "?")
+
+    class MCPView(App):
+        CSS = TUI_CSS
+        BINDINGS = [
+            ("q", "quit", "Quit"),
+            ("slash", "focus_filter", "Filter"),
+            ("escape", "clear_filter", "Clear filter"),
+            ("r", "toggle_raw", "Raw JSON"),
+            ("y", "copy", "Copy JSON"),
+            ("e", "expand_all", "Expand"),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            info = doc.get("serverInfo") or {}
+            self.title = f"{info.get('name', 'mcp')} {info.get('version', '')}".strip()
+            self.sub_title = str(doc.get("target", ""))
+            self.raw_only = False
+            self.current: tuple[str, dict[str, Any]] | None = None
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with Horizontal(id="body"):
+                with Vertical(id="sidebar"):
+                    yield Input(placeholder="filter…", id="filter")
+                    yield NavTree("mcp", id="nav")
+                with VerticalScroll(id="detail-scroll"):
+                    yield Static(id="detail")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            tree = self.query_one("#nav", NavTree)
+            tree.show_root = False
+            tree.guide_depth = 2
+            self.build_tree("")
+            tree.focus()
+            self.show(render_server(self.raw_only))
+
+        def build_tree(self, needle: str) -> None:
+            tree = self.query_one("#nav", NavTree)
+            tree.clear()
+            tree.root.add_leaf(Text("● server", style="bold"), data=("server", None))
+            needle = needle.casefold()
+            for key, label in SECTIONS:
+                items = doc.get(key)
+                if items is None:
+                    tree.root.add_leaf(Text(f"{label} — not offered", style="dim"), data=None)
+                    continue
+                hits = [i for i in items
+                        if not needle
+                        or needle in entry_label(i).casefold()
+                        or needle in str(i.get("description", "")).casefold()
+                        or needle in str(i.get("title", "")).casefold()]
+                branch = tree.root.add(Text(f"{label} ({len(hits)})", style="bold"), expand=True)
+                for item in hits:
+                    branch.add_leaf(entry_label(item), data=(key.rstrip("s"), item))
+
+        def show(self, renderable: Any) -> None:
+            self.query_one("#detail", Static).update(renderable)
+            self.query_one("#detail-scroll", VerticalScroll).scroll_home(animate=False)
+
+        def refresh_detail(self) -> None:
+            if self.current is None:
+                self.show(render_server(self.raw_only))
+            else:
+                self.show(render_detail(*self.current, self.raw_only))
+
+        def on_tree_node_highlighted(self, event: NavTree.NodeHighlighted) -> None:
+            data = event.node.data
+            if data is None:
+                return
+            kind, item = data
+            self.current = None if kind == "server" else (kind, item)
+            self.refresh_detail()
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            self.build_tree(event.value)
+
+        def action_focus_filter(self) -> None:
+            self.query_one("#filter", Input).focus()
+
+        def action_clear_filter(self) -> None:
+            self.query_one("#filter", Input).value = ""
+            self.query_one("#nav", NavTree).focus()
+
+        def action_toggle_raw(self) -> None:
+            self.raw_only = not self.raw_only
+            self.refresh_detail()
+            self.notify("raw JSON only" if self.raw_only else "full detail", timeout=2)
+
+        def action_expand_all(self) -> None:
+            self.query_one("#nav", NavTree).root.expand_all()
+
+        def action_copy(self) -> None:
+            payload = self.current[1] if self.current else doc
+            self.copy_to_clipboard(json.dumps(payload, indent=2, default=str))
+            self.notify("copied JSON to clipboard", timeout=2)
+
+    MCPView().run()
+    return 0
+
+
 # --------------------------------------------------------------------------- cli
 
 
@@ -642,6 +1008,9 @@ def main() -> int:
     p.add_argument("-H", "--header", type=parse_header, action="append", default=[],
                    metavar="'Name: value'", help="extra HTTP header; repeatable")
     p.add_argument("-c", "--compact", action="store_true", help="single-line JSON")
+    p.add_argument("--ui", action="store_true",
+                   help="browse the result in a terminal UI instead of printing JSON: "
+                        "filterable list of every tool, prompt and resource, with schemas expanded")
 
     auth = p.add_argument_group(
         "authentication",
@@ -675,6 +1044,11 @@ def main() -> int:
     if args.show_auth:
         return show_auth(args)
 
+    # Checked before connecting, so a doomed --ui never makes you sit through OAuth.
+    if args.ui and not sys.stdout.isatty():
+        fail("--ui needs a terminal; drop it to get JSON on stdout")
+        return 2
+
     try:
         result = asyncio.run(inspect_server(args))
     except KeyboardInterrupt:
@@ -683,6 +1057,9 @@ def main() -> int:
         for e in flatten(exc):
             fail(f"{type(e).__name__}: {e}")
         return 1
+
+    if args.ui:
+        return run_ui(result)
 
     emit(result, args.compact)
     return 0
