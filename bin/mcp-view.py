@@ -28,8 +28,22 @@ TERMINAL UI
     included, plus the entry's complete raw JSON underneath. Fields this tool has
     never heard of are shown too, so a server extension is never silently dropped.
 
+    Enter on a tool or prompt runs it. An editor opens seeded with a JSON template
+    built from the schema — required arguments and anything with a default, typed
+    from the schema (enums use their first value) — with the schema beside it for
+    reference. The result comes back as text content, structured content and the
+    complete raw JSON, with the call's duration and whether the server flagged it
+    as an error. The connection stays open for the life of the UI, so calls are
+    made on the same authenticated session that listed the tools.
+
       /  filter        r  raw JSON only     y  copy entry as JSON
       e  expand all    q  quit              esc  clear the filter
+      enter  run the selected tool or prompt
+
+    In the argument editor:
+
+      ctrl+r  run     ctrl+f  add every optional field     ctrl+e  clear
+      esc     cancel
 
 OUTPUT
     One JSON document on stdout; progress and errors on stderr, so `| jq` just works.
@@ -481,6 +495,17 @@ async def collect(session: ClientSession) -> dict[str, Any]:
     return sections
 
 
+async def run_session(session: ClientSession, args: argparse.Namespace) -> dict[str, Any]:
+    """Fetch the document, then hand the still-open session to the UI if one was asked for.
+
+    The session has to outlive the fetch so the UI can call tools and get prompts.
+    """
+    doc = await describe(session, args)
+    if args.ui:
+        await run_ui(doc, session)
+    return doc
+
+
 async def describe(session: ClientSession, args: argparse.Namespace) -> dict[str, Any]:
     init = await session.initialize()
     step(f"connected to {init.server_info.name} {init.server_info.version}")
@@ -509,18 +534,18 @@ async def inspect_server(args: argparse.Namespace) -> dict[str, Any]:
             params = StdioServerParameters(command=cmd[0], args=cmd[1:], env=dict(os.environ))
             async with stdio_client(params) as streams:
                 async with ClientSession(*streams[:2]) as session:
-                    return await describe(session, args)
+                    return await run_session(session, args)
 
         if args.transport == "sse":
             async with sse_client(args.target, headers=headers, auth=auth) as streams:
                 async with ClientSession(*streams[:2]) as session:
-                    return await describe(session, args)
+                    return await run_session(session, args)
 
         # Streamable HTTP takes its auth and headers through the httpx client.
         async with create_mcp_http_client(headers=headers, auth=auth) as http_client:
             async with streamable_http_client(args.target, http_client=http_client) as streams:
                 async with ClientSession(*streams[:2]) as session:
-                    return await describe(session, args)
+                    return await run_session(session, args)
 
 
 # --------------------------------------------------------------------------- tui
@@ -533,10 +558,19 @@ Screen { layers: base; }
 #nav { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
 #detail-scroll { padding: 0 2 1 3; }
 #detail { width: 1fr; }
+
+#dialog { width: 90%; height: 85%; border: round $accent; background: $surface; padding: 1 2; }
+#dialog-title { width: 1fr; padding-bottom: 1; }
+#dialog-body { height: 1fr; }
+#args { width: 55%; border: solid $panel-lighten-2; }
+#dialog-ref { width: 45%; padding-left: 2; }
+#result-scroll { height: 1fr; }
+#dialog-hint { padding-top: 1; }
+ModalScreen { align: center middle; }
 """
 
 
-def run_ui(doc: dict[str, Any]) -> int:
+async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
     """Browse a fetched document in a Textual app.
 
     Textual and rich are imported here rather than at module scope so the plain
@@ -548,9 +582,11 @@ def run_ui(doc: dict[str, Any]) -> int:
     from rich.table import Table
     from rich.text import Text
     from rich.tree import Tree as RichTree
+    from textual import work
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical, VerticalScroll
-    from textual.widgets import Footer, Header, Input, Static
+    from textual.screen import ModalScreen
+    from textual.widgets import Footer, Header, Input, Label, Static, TextArea
     from textual.widgets import Tree as NavTree
 
     # JSON Schema keywords rendered inline on a property's own line.
@@ -769,6 +805,156 @@ def run_ui(doc: dict[str, Any]) -> int:
         parts += [Rule("inventory", style="dim"), kv_table(counts)]
         return Group(*parts)
 
+    def sample_value(schema: Any) -> Any:
+        """A plausible starting value for one property, from its schema."""
+        if not isinstance(schema, dict):
+            return None
+        for key in ("default", "const"):
+            if key in schema:
+                return schema[key]
+        if enum := schema.get("enum"):
+            return enum[0]
+        kind = schema.get("type")
+        if isinstance(kind, list):
+            kind = next((k for k in kind if k != "null"), None)
+        if kind == "object" or (kind is None and "properties" in schema):
+            required = set(schema.get("required") or [])
+            return {n: sample_value(s) for n, s in (schema.get("properties") or {}).items() if n in required}
+        if kind == "array":
+            return []
+        return {"string": "", "integer": 0, "number": 0, "boolean": False, "null": None}.get(kind)
+
+    def arg_template(item: dict[str, Any], kind: str, everything: bool = False) -> str:
+        """Seed JSON for the editor: required arguments by default, all of them on request."""
+        if kind == "prompt":
+            args = item.get("arguments") or []
+            return json.dumps(
+                {a["name"]: a.get("default", "") for a in args if everything or a.get("required")},
+                indent=2,
+            )
+        schema = item.get("inputSchema") or {}
+        required = set(schema.get("required") or [])
+        body = {
+            name: sample_value(sub)
+            for name, sub in (schema.get("properties") or {}).items()
+            if everything or name in required or "default" in sub
+        }
+        return json.dumps(body, indent=2)
+
+    def render_result(title: str, payload: Any, elapsed: float) -> Any:
+        """Whatever came back, in full: friendly view first, complete raw JSON after."""
+        raw = payload.model_dump(mode="json", exclude_none=True, by_alias=True)
+        parts: list[Any] = []
+        failed = bool(getattr(payload, "is_error", False))
+        head = Text()
+        head.append(" ERROR " if failed else " OK ", style="reverse red" if failed else "reverse green")
+        head.append(f"  {title}   {elapsed:.2f}s", style="bold")
+        parts += [head, Text()]
+
+        for block in getattr(payload, "content", None) or []:
+            btype = getattr(block, "type", "?")
+            if text := getattr(block, "text", None):
+                parts += [Rule(btype, style="dim"), Text(str(text)), Text()]
+            else:
+                parts += [Rule(btype, style="dim"),
+                          json_block(btype, block.model_dump(mode="json", exclude_none=True, by_alias=True)),
+                          Text()]
+
+        for message in getattr(payload, "messages", None) or []:
+            body = getattr(message.content, "text", None)
+            parts += [Rule(str(message.role), style="dim"),
+                      Text(str(body)) if body else json_block(
+                          "content", message.content.model_dump(mode="json", exclude_none=True, by_alias=True)),
+                      Text()]
+
+        if structured := getattr(payload, "structured_content", None):
+            parts += [Rule("structured content", style="dim"), json_block("structuredContent", structured), Text()]
+
+        parts += [Rule("raw json", style="dim"),
+                  Syntax(json.dumps(raw, indent=2, default=str), "json",
+                         theme="ansi_dark", background_color="default", word_wrap=True)]
+        return Group(*parts)
+
+    class ArgsScreen(ModalScreen):
+        """Edit the JSON arguments for one tool or prompt, with its schema alongside."""
+
+        BINDINGS = [
+            ("escape", "cancel", "Cancel"),
+            ("ctrl+r", "run", "Run"),
+            ("ctrl+f", "fill", "All fields"),
+            ("ctrl+e", "empty", "Clear"),
+        ]
+
+        def __init__(self, kind: str, item: dict[str, Any]) -> None:
+            super().__init__()
+            self.kind, self.item = kind, item
+
+        def compose(self) -> ComposeResult:
+            name = entry_label(self.item)
+            with Vertical(id="dialog"):
+                yield Label(Text(f"{self.kind}  {name}", style="bold"), id="dialog-title")
+                with Horizontal(id="dialog-body"):
+                    yield TextArea.code_editor(
+                        arg_template(self.item, self.kind), language="json", id="args")
+                    with VerticalScroll(id="dialog-ref"):
+                        yield Static(self.reference())
+                yield Label(Text("ctrl+r run    ctrl+f all fields    ctrl+e clear    esc cancel",
+                                 style="dim"), id="dialog-hint")
+
+        def reference(self) -> Any:
+            if self.kind == "prompt":
+                table = Table.grid(padding=(0, 2))
+                table.add_column(style="bold cyan", no_wrap=True)
+                table.add_column(style="italic yellow", no_wrap=True)
+                table.add_column(overflow="fold")
+                for arg in self.item.get("arguments") or []:
+                    table.add_row(arg.get("name", ""),
+                                  "required" if arg.get("required") else "optional",
+                                  str(arg.get("description", "")))
+                return Group(Text("arguments", style="bold"), table)
+            return schema_block("input schema", self.item.get("inputSchema") or {})
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+        def action_fill(self) -> None:
+            self.query_one("#args", TextArea).text = arg_template(self.item, self.kind, everything=True)
+
+        def action_empty(self) -> None:
+            self.query_one("#args", TextArea).text = "{}"
+
+        def action_run(self) -> None:
+            text = self.query_one("#args", TextArea).text.strip() or "{}"
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as e:
+                self.notify(f"invalid JSON: {e}", severity="error", timeout=6)
+                return
+            if not isinstance(parsed, dict):
+                self.notify("arguments must be a JSON object", severity="error", timeout=6)
+                return
+            self.dismiss(parsed)
+
+    class ResultScreen(ModalScreen):
+        BINDINGS = [("escape", "close", "Close"), ("q", "close", "Close"), ("y", "copy", "Copy")]
+
+        def __init__(self, renderable: Any, raw: Any) -> None:
+            super().__init__()
+            self.renderable, self.raw = renderable, raw
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="dialog"):
+                with VerticalScroll(id="result-scroll"):
+                    yield Static(self.renderable)
+                yield Label(Text("esc close    y copy JSON", style="dim"), id="dialog-hint")
+
+        def action_close(self) -> None:
+            self.dismiss(None)
+
+        def action_copy(self) -> None:
+            self.app.copy_to_clipboard(json.dumps(self.raw, indent=2, default=str))
+            self.notify("copied result JSON", timeout=2)
+
     SECTIONS = (("tools", "Tools"), ("prompts", "Prompts"),
                 ("resources", "Resources"), ("resourceTemplates", "Resource templates"))
 
@@ -784,6 +970,7 @@ def run_ui(doc: dict[str, Any]) -> int:
             ("r", "toggle_raw", "Raw JSON"),
             ("y", "copy", "Copy JSON"),
             ("e", "expand_all", "Expand"),
+            ("enter", "invoke", "Run"),
         ]
 
         def __init__(self) -> None:
@@ -841,6 +1028,43 @@ def run_ui(doc: dict[str, Any]) -> int:
             else:
                 self.show(render_detail(*self.current, self.raw_only))
 
+        def on_tree_node_selected(self, event: NavTree.NodeSelected) -> None:
+            """Enter on a tool or prompt opens the argument editor."""
+            data = event.node.data
+            if data and data[0] in ("tool", "prompt"):
+                self.invoke(data[0], data[1])
+
+        def action_invoke(self) -> None:
+            if self.current and self.current[0] in ("tool", "prompt"):
+                self.invoke(*self.current)
+            else:
+                self.notify("only tools and prompts can be run", severity="warning", timeout=3)
+
+        def invoke(self, kind: str, item: dict[str, Any]) -> None:
+            def launch(arguments: dict[str, Any] | None) -> None:
+                if arguments is not None:
+                    self.execute(kind, item, arguments)
+
+            self.push_screen(ArgsScreen(kind, item), launch)
+
+        @work
+        async def execute(self, kind: str, item: dict[str, Any], arguments: dict[str, Any]) -> None:
+            name = entry_label(item)
+            self.notify(f"running {name}…", timeout=2)
+            started = time.monotonic()
+            try:
+                if kind == "tool":
+                    payload = await session.call_tool(name, arguments or None)
+                else:
+                    payload = await session.get_prompt(
+                        name, {k: str(v) for k, v in arguments.items()} or None)
+            except Exception as e:  # a failed call is a result to read, not a crash
+                self.notify(f"{type(e).__name__}: {e}", severity="error", timeout=8)
+                return
+            elapsed = time.monotonic() - started
+            raw = payload.model_dump(mode="json", exclude_none=True, by_alias=True)
+            self.push_screen(ResultScreen(render_result(name, payload, elapsed), raw))
+
         def on_tree_node_highlighted(self, event: NavTree.NodeHighlighted) -> None:
             data = event.node.data
             if data is None:
@@ -872,8 +1096,7 @@ def run_ui(doc: dict[str, Any]) -> int:
             self.copy_to_clipboard(json.dumps(payload, indent=2, default=str))
             self.notify("copied JSON to clipboard", timeout=2)
 
-    MCPView().run()
-    return 0
+    await MCPView().run_async()
 
 
 # --------------------------------------------------------------------------- cli
@@ -1058,8 +1281,8 @@ def main() -> int:
             fail(f"{type(e).__name__}: {e}")
         return 1
 
-    if args.ui:
-        return run_ui(result)
+    if args.ui:  # the UI already presented it
+        return 0
 
     emit(result, args.compact)
     return 0

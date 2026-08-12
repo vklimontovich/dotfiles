@@ -50,7 +50,8 @@ Small helpers in `bin/`:
   Zero-install: resolved via bun auto-install. Needs [bun](https://bun.sh/).
 - `mcp-view` — point it at an MCP server URL and get every tool, prompt and
   resource as JSON, schemas and all (`mcp-view https://host/mcp | jq`), or add
-  `--ui` for a Textual browser that expands each schema property by property.
+  `--ui` for a Textual browser that expands each schema property by property and
+  runs tools and prompts on Enter, seeding the arguments from their schema.
   Runs the OAuth flow in the browser on first use and caches the tokens under
   `~/.cache/mcp-view`; `--show-auth` prints those credentials with expiries
   resolved, `--reauth` starts over. Also speaks `-t sse` and `-t stdio`.
