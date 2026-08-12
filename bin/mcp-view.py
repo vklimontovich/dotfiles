@@ -48,6 +48,12 @@ TERMINAL UI
       ctrl+r  run     ctrl+f  add every optional field     ctrl+e  clear
       esc     cancel
 
+ERRORS
+    Failures are reported in the server's own words, never as a stack trace: the
+    parameters an authorization server sent back when it refused, and the status,
+    headers and full body of the last failing HTTP response. --debug adds the
+    tracebacks and the SDK's own logging when you need to see the machinery.
+
 OUTPUT
     One JSON document on stdout; progress and errors on stderr, so `| jq` just works.
 
@@ -126,6 +132,51 @@ from pydantic import AnyUrl
 
 PROG = "mcp-view"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "mcp-view"
+
+# Filled in by the response hook below, so a failure can be explained with the
+# server's own words instead of a stack trace. Last error response wins.
+LAST_HTTP_ERROR: dict[str, Any] = {}
+
+
+class AuthorizationDenied(RuntimeError):
+    """The authorization server redirected back with an error instead of a code."""
+
+    def __init__(self, params: dict[str, str]):
+        self.params = params
+        detail = params.get("error_description") or ""
+        super().__init__(f"authorization denied: {params.get('error', 'unknown')}"
+                         + (f" — {detail}" if detail else ""))
+
+
+async def record_http_error(response: Any) -> None:
+    """Remember the body of any failing HTTP response, so we can show it verbatim."""
+    if response.status_code < 400:
+        return
+    body: Any = None
+    with contextlib.suppress(Exception):
+        await response.aread()
+        text = response.text
+        try:
+            body = json.loads(text)
+        except (ValueError, TypeError):
+            body = text[:8000] + "…" if len(text) > 8000 else text
+    LAST_HTTP_ERROR.clear()
+    LAST_HTTP_ERROR.update({
+        "status": response.status_code,
+        "reason": response.reason_phrase,
+        "method": response.request.method,
+        "url": str(response.request.url),
+        "headers": {k: v for k, v in response.headers.items()
+                    if k.lower() in ("www-authenticate", "content-type", "location", "retry-after")},
+        "body": body,
+    })
+
+
+def watched_http_client(headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
+    """A normal MCP http client, plus the hook that captures error bodies."""
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    client.event_hooks["response"].append(record_http_error)
+    return client
 
 
 # --------------------------------------------------------------------------- colour
@@ -305,8 +356,7 @@ class CallbackServer:
         if not got:
             raise TimeoutError(f"no OAuth redirect received within {timeout:.0f}s")
         if "error" in self.result:
-            desc = self.result.get("error_description")
-            raise RuntimeError(f"authorization denied: {self.result['error']}" + (f" - {desc}" if desc else ""))
+            raise AuthorizationDenied(self.result)
         return AuthorizationCodeResult(
             code=self.result["code"],
             state=self.result.get("state"),
@@ -540,12 +590,13 @@ async def inspect_server(args: argparse.Namespace) -> dict[str, Any]:
                     return await run_session(session, args)
 
         if args.transport == "sse":
-            async with sse_client(args.target, headers=headers, auth=auth) as streams:
+            async with sse_client(args.target, headers=headers, auth=auth,
+                                  httpx_client_factory=watched_http_client) as streams:
                 async with ClientSession(*streams[:2]) as session:
                     return await run_session(session, args)
 
         # Streamable HTTP takes its auth and headers through the httpx client.
-        async with create_mcp_http_client(headers=headers, auth=auth) as http_client:
+        async with watched_http_client(headers=headers, auth=auth) as http_client:
             async with streamable_http_client(args.target, http_client=http_client) as streams:
                 async with ClientSession(*streams[:2]) as session:
                     return await run_session(session, args)
@@ -1112,6 +1163,36 @@ async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
 # --------------------------------------------------------------------------- cli
 
 
+def detail_json(payload: Any) -> None:
+    """Print a JSON block to stderr, coloured when a terminal is watching."""
+    text = render_json(payload, 2) if COLOR_ERR else json.dumps(payload, indent=2, default=str)
+    print(text, file=sys.stderr)
+
+
+def report_failure(exc: BaseException, debug: bool) -> None:
+    """Explain a failure in the server's own words. Tracebacks only with --debug."""
+    leaves = flatten(exc)
+    for e in leaves:
+        fail(str(e) if isinstance(e, AuthorizationDenied) else f"{type(e).__name__}: {e}")
+
+    for e in leaves:
+        if isinstance(e, AuthorizationDenied):
+            note("the authorization server redirected back with:")
+            detail_json(e.params)
+
+    if LAST_HTTP_ERROR:
+        status = f"{LAST_HTTP_ERROR['status']} {LAST_HTTP_ERROR.get('reason') or ''}".strip()
+        note(f"last failing HTTP response ({status}):")
+        detail_json(LAST_HTTP_ERROR)
+
+    if debug:
+        import traceback
+        for e in leaves:
+            traceback.print_exception(type(e), e, e.__traceback__)
+    else:
+        note("re-run with --debug for tracebacks and SDK logs")
+
+
 def flatten(exc: BaseException) -> list[BaseException]:
     """Unwrap ExceptionGroups so the real cause gets printed, not 'unhandled errors in a TaskGroup'."""
     if isinstance(exc, BaseExceptionGroup):
@@ -1241,6 +1322,8 @@ def main() -> int:
     p.add_argument("-H", "--header", type=parse_header, action="append", default=[],
                    metavar="'Name: value'", help="extra HTTP header; repeatable")
     p.add_argument("-c", "--compact", action="store_true", help="single-line JSON")
+    p.add_argument("--debug", action="store_true",
+                   help="show tracebacks and the SDK's own logging instead of a plain error")
     p.add_argument("--ui", action="store_true",
                    help="browse the result in a terminal UI instead of printing JSON: "
                         "filterable list of every tool, prompt and resource, with schemas expanded")
@@ -1269,6 +1352,12 @@ def main() -> int:
         return 0
     args = p.parse_args()
 
+    if not args.debug:
+        # The SDK logs full tracebacks of its own; we render the failure ourselves.
+        import logging
+        logging.getLogger("mcp").setLevel(logging.CRITICAL + 1)
+        logging.getLogger("httpx").setLevel(logging.CRITICAL + 1)
+
     args.storage = FileTokenStorage(args.target, enabled=not args.no_cache)
     if args.reauth:
         step("clearing cached credentials")
@@ -1287,8 +1376,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except BaseException as exc:  # transports surface failures wrapped in task groups
-        for e in flatten(exc):
-            fail(f"{type(e).__name__}: {e}")
+        report_failure(exc, args.debug)
         return 1
 
     if args.ui:  # the UI already presented it
