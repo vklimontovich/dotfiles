@@ -4,6 +4,7 @@
 # dependencies = [
 #   "mcp>=2.0.0,<3",
 #   "textual>=1.0",
+#   "json5>=0.9",
 # ]
 # ///
 """Connect to an MCP server (handling OAuth if required) and dump everything it exposes as JSON.
@@ -40,7 +41,9 @@ TERMINAL UI
       e  expand all    q  quit              esc  clear the filter
       enter  run the selected tool or prompt
 
-    In the argument editor:
+    The editor accepts JSON5, so arguments can be typed the way you would write
+    them in JavaScript — bare keys, single quotes, trailing commas, comments,
+    hex and unary plus. {limit: 1, offset: 1} is as valid as the strict spelling.
 
       ctrl+r  run     ctrl+f  add every optional field     ctrl+e  clear
       esc     cancel
@@ -582,6 +585,11 @@ async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
     from rich.table import Table
     from rich.text import Text
     from rich.tree import Tree as RichTree
+    try:  # JSON5 lets you type {limit: 1, offset: 1} instead of strict JSON
+        from json5 import loads as parse_relaxed
+    except ImportError:
+        from json import loads as parse_relaxed
+
     from textual import work
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -898,7 +906,8 @@ async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
                         arg_template(self.item, self.kind), language="json", id="args")
                     with VerticalScroll(id="dialog-ref"):
                         yield Static(self.reference())
-                yield Label(Text("ctrl+r run    ctrl+f all fields    ctrl+e clear    esc cancel",
+                yield Label(Text("ctrl+r run    ctrl+f all fields    ctrl+e clear    esc cancel"
+                                 "        JSON5 ok: {limit: 1, /* comment */ tags: ['a',]}",
                                  style="dim"), id="dialog-hint")
 
         def reference(self) -> Any:
@@ -926,9 +935,9 @@ async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
         def action_run(self) -> None:
             text = self.query_one("#args", TextArea).text.strip() or "{}"
             try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError as e:
-                self.notify(f"invalid JSON: {e}", severity="error", timeout=6)
+                parsed = parse_relaxed(text)
+            except ValueError as e:
+                self.notify(f"cannot parse: {e}", severity="error", timeout=6)
                 return
             if not isinstance(parsed, dict):
                 self.notify("arguments must be a JSON object", severity="error", timeout=6)
