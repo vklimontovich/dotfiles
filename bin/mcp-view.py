@@ -1053,11 +1053,12 @@ async def run_ui(doc: dict[str, Any], session: ClientSession) -> None:
             self.notify(f"running {name}…", timeout=2)
             started = time.monotonic()
             try:
+                # Pass the dict as-is: `arguments or None` would turn a legitimate
+                # empty object into a missing field, which strict servers reject.
                 if kind == "tool":
-                    payload = await session.call_tool(name, arguments or None)
+                    payload = await session.call_tool(name, arguments)
                 else:
-                    payload = await session.get_prompt(
-                        name, {k: str(v) for k, v in arguments.items()} or None)
+                    payload = await session.get_prompt(name, {k: str(v) for k, v in arguments.items()})
             except Exception as e:  # a failed call is a result to read, not a crash
                 self.notify(f"{type(e).__name__}: {e}", severity="error", timeout=8)
                 return
