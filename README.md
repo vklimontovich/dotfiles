@@ -48,6 +48,12 @@ Small helpers in `bin/`:
 - `dff` — render a `git diff` as a Pierre HTML page and open it in the browser.
   Works standalone (`dff origin/main...HEAD`) or as `GIT_EXTERNAL_DIFF=dff git diff`.
   Zero-install: resolved via bun auto-install. Needs [bun](https://bun.sh/).
+- `mcp-view` — point it at an MCP server URL and get every tool, prompt and
+  resource as JSON, schemas and all (`mcp-view https://host/mcp | jq`). Runs the
+  OAuth flow in the browser on first use and caches the tokens under
+  `~/.cache/mcp-view`; `--show-auth` prints those credentials with expiries
+  resolved, `--reauth` starts over. Also speaks `-t sse` and `-t stdio`.
+  Zero-install: a `uv` script with inline dependencies. Needs [uv](https://docs.astral.sh/uv/).
 - `wifi-check` — explain and grade the current macOS Wi-Fi link (RSSI, SNR, MCS,
   channel busy) from `wdutil info`. Run with `sudo`; `--channels` scans nearby
   networks via CoreWLAN.
