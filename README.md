@@ -28,9 +28,10 @@ What I actually use day-to-day, and where to look in the repo.
     - AWS profile persisted across shells in `~/.aws-profile`.
     - Lazy `fnm` setup, plus a small `_lazy_load` helper for slow init scripts.
     - Aliases: `k=kubectl`, `ll=ls -lh`, `pnpm`/`bun` wrapped through `ding`.
-- **[Claude Code](https://claude.com/claude-code)** — coding agent. Global
-  config: `claude/CLAUDE.md` (instructions), `claude/settings.json` (perms,
-  hooks, theme).
+- **Claude Code / Codex** — coding agents. `claude` and `codex` are profile
+  pickers in `bin/commonrc`: use `--profile <name>` / `-P <name>`,
+  `CLAUDE_PROFILE` / `CODEX_PROFILE`, or the interactive picker. Codex keeps
+  each profile in an isolated `CODEX_HOME` under `~/.codex-profiles/`.
 - **[Git](https://git-scm.com/)** — `.gitconfig` (identity, LFS, Kaleidoscope
   diff/merge), `.gitignore_global`, and `.config/git/ignore`. Machine paths use
   `~` so the same config works on Linux remotes.

@@ -1,0 +1,392 @@
+- generic [active] [ref=e1]:
+  - main [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e9]:
+          - generic [ref=e10]: ⚡ ⚡ Learn how Investing.com uses Jitsu to move data faster
+          - link "Learn more" [ref=e11] [cursor=pointer]:
+            - /url: /customers/investing
+            - generic [ref=e12]: Learn more
+            - img [ref=e13]
+        - generic [ref=e18]:
+          - link [ref=e19] [cursor=pointer]:
+            - /url: /
+            - generic [ref=e20]:
+              - img [ref=e22]
+              - img [ref=e26]
+          - generic [ref=e33]:
+            - navigation "Main" [ref=e35]:
+              - list [ref=e37]:
+                - listitem [ref=e38]:
+                  - button "Product" [ref=e39] [cursor=pointer]:
+                    - text: Product
+                    - img [ref=e40]
+                - listitem [ref=e42]:
+                  - button "Resources" [ref=e43] [cursor=pointer]:
+                    - text: Resources
+                    - img [ref=e44]
+                - listitem [ref=e46]:
+                  - link "Customers" [ref=e47] [cursor=pointer]:
+                    - /url: /customers
+                - listitem [ref=e48]:
+                  - link "Docs" [ref=e49] [cursor=pointer]:
+                    - /url: /docs
+                - listitem [ref=e50]:
+                  - link "Pricing" [ref=e51] [cursor=pointer]:
+                    - /url: /pricing
+            - generic [ref=e52]:
+              - link "Star 3.4k" [ref=e53] [cursor=pointer]:
+                - /url: https://github.com/jitsucom/jitsu
+                - generic [ref=e54]:
+                  - img [ref=e56]
+                  - generic [ref=e58]: Star
+                - generic [ref=e60]: 3.4k
+              - link "Sign In" [ref=e62] [cursor=pointer]:
+                - /url: https://use.jitsu.com
+      - generic [ref=e63]:
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - text: Capture Event Data into
+            - generic [ref=e67]:
+              - text: Your
+              - img [ref=e68]
+            - text: Stack
+          - generic [ref=e70]:
+            - text: Jitsu is the fastest, most durable way to collect event data from every source - web, app, email, chatbot, CRM - into your data warehouse.
+            - generic [ref=e71]:
+              - text: 100%
+              - img [ref=e72]
+            - text: open-source. Purpose built, secure and ready in minutes.
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - link "Get Started" [ref=e77] [cursor=pointer]:
+                - /url: https://use.jitsu.com
+              - link "Book a demo" [ref=e78] [cursor=pointer]:
+                - /url: /contact
+            - generic [ref=e79]:
+              - generic [ref=e80]:
+                - img [ref=e81]
+                - generic [ref=e84]: Free for up to 200k events
+              - generic [ref=e85]:
+                - img [ref=e86]
+                - generic [ref=e89]: No credit card required
+          - generic [ref=e90]:
+            - generic [ref=e91]: Backed by
+            - img [ref=e93]
+        - generic [ref=e99]:
+          - generic [ref=e100]: Trusted by the best industry leaders
+          - generic [ref=e105]:
+            - generic [ref=e106]:
+              - img "PandaDoc" [ref=e108]
+              - img "investing" [ref=e116]
+              - img [ref=e118]
+              - img "embeddables" [ref=e127]
+              - img [ref=e129]
+              - img "rarible" [ref=e134]
+              - img [ref=e136]
+              - img [ref=e149]
+              - link "census" [ref=e172] [cursor=pointer]:
+                - /url: https://getcensus.com?utm_source=Jitsu
+                - img "census" [ref=e174]
+              - img [ref=e176]
+            - generic [ref=e185]:
+              - img "PandaDoc" [ref=e187]
+              - img "investing" [ref=e195]
+              - img [ref=e197]
+              - img "embeddables" [ref=e206]
+              - img [ref=e208]
+              - img "rarible" [ref=e213]
+              - img [ref=e215]
+              - img [ref=e228]
+              - link "census" [ref=e251] [cursor=pointer]:
+                - /url: https://getcensus.com?utm_source=Jitsu
+                - img "census" [ref=e253]
+              - img [ref=e255]
+          - link "Read our Customers Stories" [ref=e265] [cursor=pointer]:
+            - /url: /customers
+            - generic [ref=e266]: Read our Customers Stories
+            - img [ref=e267]
+        - generic [ref=e270]:
+          - heading "What Jitsu Can do" [level=2] [ref=e271]
+          - generic [ref=e272]:
+            - generic [ref=e275]:
+              - generic [ref=e281]:
+                - generic [ref=e282] [cursor=pointer]:
+                  - img [ref=e284]
+                  - generic [ref=e288]: HTML
+                - generic [ref=e289] [cursor=pointer]:
+                  - img [ref=e291]
+                  - generic [ref=e297]: React
+              - code [ref=e301]:
+                - generic [ref=e302]: <html>
+                - generic [ref=e303]: <head>
+                - generic [ref=e304]: <script async src="https://your-jitsu-domain.com/p.js"></script>
+                - generic [ref=e305]: </head>
+                - generic [ref=e306]: </html>
+            - generic [ref=e307]:
+              - img [ref=e310]
+              - heading "Collect data in a snap" [level=3] [ref=e314]:
+                - generic [ref=e315]: Collect data in a snap
+              - generic [ref=e316]: Implementation = add a Tag. That’s it. That’s the entire setup. This is the same type of anyone-can-do-it magic found in Google Analytics and Segment.
+              - link "Learn more" [ref=e318] [cursor=pointer]:
+                - /url: /docs/sending-data
+                - generic [ref=e319]: Learn more
+                - img [ref=e320]
+          - generic [ref=e322]:
+            - generic [ref=e325]:
+              - img [ref=e326]
+              - generic [ref=e332]:
+                - generic [ref=e333]: Events
+                - img [ref=e335]
+              - generic [ref=e340]:
+                - generic [ref=e341]: Connectors
+                - img [ref=e343]
+              - img [ref=e348]
+              - generic [ref=e359]:
+                - generic [ref=e360]: CRM
+                - img [ref=e362]
+              - generic [ref=e368]:
+                - generic [ref=e369]: Analytics
+                - img [ref=e371]
+            - generic [ref=e374]:
+              - img [ref=e377]
+              - heading "Unified data without vendor lock-in" [level=3] [ref=e383]:
+                - generic [ref=e384]: Unified data without vendor lock-in
+              - generic [ref=e385]: Make your data warehouse the single source of truth for your data. Jitsu is tailor-made for delivering the data to data warehouses as fast as possible.
+              - link "What is warehouse-first" [ref=e387] [cursor=pointer]:
+                - /url: /blog/data-warehouse-first
+                - generic [ref=e388]: What is warehouse-first
+                - img [ref=e389]
+          - generic [ref=e391]:
+            - generic [ref=e394]:
+              - img [ref=e395]
+              - generic [ref=e399]:
+                - generic [ref=e400]: Website
+                - img [ref=e402]
+              - generic [ref=e407]:
+                - generic [ref=e408]: App
+                - img [ref=e410]
+              - generic [ref=e417]:
+                - generic [ref=e418]: API
+                - img [ref=e420]
+              - img [ref=e426]
+              - generic [ref=e430]:
+                - img [ref=e432]
+                - generic [ref=e443]:
+                  - img [ref=e445]
+                  - img [ref=e453]
+                  - img [ref=e462]
+                  - img [ref=e478]
+                  - img [ref=e485]
+                  - img "file_type_mysql" [ref=e500]
+            - generic [ref=e503]:
+              - img [ref=e506]
+              - heading "Realtime event streaming" [level=3] [ref=e508]:
+                - generic [ref=e509]: Realtime event streaming
+              - generic [ref=e510]:
+                - text: Stream user behavioral data from your apps to your warehouse of your choice
+                - generic [ref=e511]:
+                  - text: in real-time
+                  - img [ref=e512]
+                - text: . Have your data ready for analysis in minutes, not hours.
+              - link "Learn more" [ref=e515] [cursor=pointer]:
+                - /url: /features/event-streaming
+                - generic [ref=e516]: Learn more
+                - img [ref=e517]
+          - generic [ref=e519]:
+            - generic [ref=e521]:
+              - generic [ref=e527]: function.js
+              - code [ref=e531]:
+                - generic [ref=e532]: "export default async function(event, { log, props, store }) {"
+                - generic [ref=e533]: "if (event.type === \"identify\") {"
+                - generic [ref=e534]: "if (await store.set(`signup/${event.traits.email}`)) {"
+                - generic [ref=e535]: "log(`User ${event.traits.email} already signed up`);"
+                - generic [ref=e536]: "} else {"
+                - generic [ref=e537]: "await store.set(`signup/${event.traits.email}`, true);"
+                - generic [ref=e538]: "await fetch(`https://slack.com/api/chat.postMessage`, {"
+                - generic [ref=e539]: "method: \"POST\","
+                - generic [ref=e540]: "body: JSON.stringify({"
+                - generic [ref=e541]: "token: props.SLACK_TOKEN,"
+                - generic [ref=e542]: "channel: props.CHANNEL_ID,"
+                - generic [ref=e543]: "text: `Hooray! We have new user ${event.traits.email}`"
+                - generic [ref=e544]: "})"
+                - generic [ref=e545]: "});"
+                - generic [ref=e546]: "}"
+                - generic [ref=e547]: "}"
+                - generic [ref=e548]: "}"
+            - generic [ref=e549]:
+              - img [ref=e552]
+              - heading "Infinite Developer Flexibility" [level=3] [ref=e555]:
+                - generic [ref=e556]: Infinite Developer Flexibility
+              - generic [ref=e557]:
+                - text: Modify, filter or augment events before it is stored in your warehouse with
+                - generic [ref=e558]:
+                  - text: Jitsu Functions
+                  - img [ref=e559]
+                - text: . The functions are executed in a Javascript runtime environment, which provides access to the vast ecosystem of Javascript tools, such as npm packages, libraries, and key-value storage.
+              - link "Learn more about Jitsu Functions" [ref=e562] [cursor=pointer]:
+                - /url: /features/functions
+                - generic [ref=e563]: Learn more about Jitsu Functions
+                - img [ref=e564]
+          - generic [ref=e567]:
+            - generic [ref=e568]:
+              - heading "Implement Jitsu in 3 easy steps" [level=2] [ref=e569]
+              - generic [ref=e570]:
+                - generic [ref=e571]:
+                  - generic [ref=e572]: "01"
+                  - generic [ref=e573]: Capture
+                  - generic [ref=e574]: As easy as adding a Google Analytics Tag. Capture events from your site, your app, and everywhere else your customers engage.
+                  - generic [ref=e577]:
+                    - generic [ref=e583]: ./index.html
+                    - code [ref=e587]:
+                      - generic [ref=e588]: <script
+                      - generic [ref=e589]: async
+                      - generic [ref=e590]: src="https://data.yourcompany.com/p.js">
+                      - generic [ref=e591]: </script>
+                - generic [ref=e592]:
+                  - generic [ref=e593]: "02"
+                  - generic [ref=e594]: Store
+                  - generic [ref=e595]: Use a data warehouse for maximum autonomy and control. Share data with anyone in any team.
+                  - generic [ref=e599]:
+                    - img [ref=e601]
+                    - img [ref=e609]
+                    - img [ref=e618]
+                    - img [ref=e634]
+                    - img [ref=e641]
+                    - img "file_type_mysql" [ref=e656]
+                - generic [ref=e659]:
+                  - generic [ref=e660]: "03"
+                  - generic [ref=e661]: Discover
+                  - generic [ref=e662]: Unlimited flexibility to understand user behaviour, engagement and experience. Get and send trusted data everywhere it needs to go
+                  - code [ref=e669]:
+                    - generic [ref=e670]: "--get signup page views in the last day"
+                    - generic [ref=e671]: select * from events where
+                    - generic [ref=e672]: context_page_path = '/signup' and
+                    - generic [ref=e673]: timestamp > now() - interval '1 day'
+            - generic [ref=e675]:
+              - link "Get Started" [ref=e676] [cursor=pointer]:
+                - /url: https://use.jitsu.com
+              - link "Talk to us" [ref=e677] [cursor=pointer]:
+                - /url: /contact
+          - heading "Other features" [level=2] [ref=e678]
+          - generic [ref=e679]:
+            - generic [ref=e680]:
+              - generic [ref=e681]:
+                - img [ref=e683]
+                - heading "Open Source" [level=3] [ref=e685]
+                - generic [ref=e686]:
+                  - text: Jitsu is
+                  - generic [ref=e687]:
+                    - text: 100% open source
+                    - img [ref=e688]
+                  - text: (MIT license) and self-hostable. Deploy it on your own infrastructure or let us run it for you.
+              - link "Learn more" [ref=e691] [cursor=pointer]:
+                - /url: /docs/self-hosting
+                - generic [ref=e692]: Learn more
+                - img [ref=e693]
+            - generic [ref=e695]:
+              - generic [ref=e696]:
+                - img [ref=e698]
+                - heading "Automatic User Identity" [level=3] [ref=e703]
+                - generic [ref=e704]:
+                  - text: Jitsu
+                  - generic [ref=e705]:
+                    - text: automatically
+                    - img [ref=e706]
+                  - text: constructs a real-time identity graph that augments your data incrementally in real-time as new information is revealed and uncovered. No complex SQL query matching needed.
+              - link "Learn more" [ref=e709] [cursor=pointer]:
+                - /url: /features/identity-stitching
+                - generic [ref=e710]: Learn more
+                - img [ref=e711]
+            - generic [ref=e713]:
+              - generic [ref=e714]:
+                - img [ref=e716]
+                - heading "Clickhouse Included" [level=3] [ref=e720]
+                - generic [ref=e721]: Use your data warehouse (Snowflake, Big Query, Redshift, Postgres, MySQL) or the one we include for free (Clickhouse).
+              - link "Learn more" [ref=e723] [cursor=pointer]:
+                - /url: /features/clickhouse
+                - generic [ref=e724]: Learn more
+                - img [ref=e725]
+            - generic [ref=e727]:
+              - generic [ref=e728]:
+                - img [ref=e730]
+                - heading "Custom Domains" [level=3] [ref=e735]
+                - generic [ref=e736]:
+                  - generic [ref=e737]:
+                    - text: Minimize
+                    - img [ref=e738]
+                  - text: ad-blocker impact on understanding your users and their intent. Deploy Jitsu on your own subdomain.
+              - link "Learn more" [ref=e741] [cursor=pointer]:
+                - /url: /features/custom-domains
+                - generic [ref=e742]: Learn more
+                - img [ref=e743]
+    - generic [ref=e748]:
+      - generic [ref=e749]:
+        - generic [ref=e750]: Subscribe to the Jitsu newsletter
+        - generic [ref=e751]: Occasional product updates when we ship something worth knowing about. No spam.
+      - generic [ref=e753]:
+        - textbox "you@company.com" [ref=e754]
+        - button "Subscribe" [ref=e755] [cursor=pointer]:
+          - text: Subscribe
+          - img [ref=e756]
+      - generic [ref=e758]:
+        - link "Follow Jitsu on Twitter" [ref=e759] [cursor=pointer]:
+          - /url: https://twitter.com/jitsucom
+          - img [ref=e760]
+        - link "Follow Jitsu on LinkedIn" [ref=e762] [cursor=pointer]:
+          - /url: https://www.linkedin.com/company/jitsu
+          - img [ref=e763]
+    - generic [ref=e768]:
+      - generic [ref=e769]:
+        - generic [ref=e770]:
+          - generic [ref=e772]:
+            - img [ref=e774]
+            - img [ref=e778]
+          - generic [ref=e784]: © Jitsu Labs, Inc
+        - generic [ref=e785]:
+          - link "Get Started" [ref=e786] [cursor=pointer]:
+            - /url: https://use.jitsu.com
+          - link "Talk to us" [ref=e787] [cursor=pointer]:
+            - /url: /contact
+            - text: Talk to us
+            - img [ref=e788]
+        - generic [ref=e790]:
+          - generic [ref=e791]: Backed by
+          - img [ref=e793]
+      - generic [ref=e797]:
+        - generic [ref=e799]:
+          - generic [ref=e800]: Features
+          - generic [ref=e801]:
+            - link "Realtime Event Streaming" [ref=e803] [cursor=pointer]:
+              - /url: /features/event-streaming
+            - link "User Identity Stitching" [ref=e805] [cursor=pointer]:
+              - /url: /features/identity-stitching
+            - link "Custom Domains" [ref=e807] [cursor=pointer]:
+              - /url: /features/custom-domains
+        - generic [ref=e809]:
+          - generic [ref=e810]: Developers
+          - generic [ref=e811]:
+            - link "Functions" [ref=e813] [cursor=pointer]:
+              - /url: /features/functions
+            - link "API Documentation" [ref=e815] [cursor=pointer]:
+              - /url: /docs
+            - link "Github" [ref=e817] [cursor=pointer]:
+              - /url: https://github.com/jitsucom/jitsu
+            - link "Segment API Compatibility" [ref=e819] [cursor=pointer]:
+              - /url: /features/segment-compatibility
+        - generic [ref=e821]:
+          - generic [ref=e822]: Company
+          - generic [ref=e823]:
+            - link "Pricing" [ref=e825] [cursor=pointer]:
+              - /url: /pricing
+            - link "Terms of Services" [ref=e827] [cursor=pointer]:
+              - /url: /tos
+            - link "Privacy Policy" [ref=e829] [cursor=pointer]:
+              - /url: /privacy
+            - link "Security and Compliance" [ref=e831] [cursor=pointer]:
+              - /url: /security
+            - link "Community Slack" [ref=e833] [cursor=pointer]:
+              - /url: /slack
+            - link "Contact Us" [ref=e835] [cursor=pointer]:
+              - /url: /contact
+  - alert [ref=e836]

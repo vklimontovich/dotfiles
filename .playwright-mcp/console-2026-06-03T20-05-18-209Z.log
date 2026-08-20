@@ -1,0 +1,4 @@
+[     887ms] [LOG] Registering event in GTM type=gtm.init_consent. UserId=undefined, email=undefined, name=undefined. dataLayer= [Object, Object, Object, ] @ :0
+[     889ms] [LOG] Registering event in GTM type=gtm.init. UserId=undefined, email=undefined, name=undefined. dataLayer= [Object, Object, Object, ] @ :0
+[     889ms] [LOG] Registering event in GTM type=gtm.js. UserId=undefined, email=undefined, name=undefined. dataLayer= [Object, Object, Object, ] @ :0
+[     890ms] [LOG] Registering event in GTM type=page_view. UserId=undefined, email=undefined, name=undefined. dataLayer= [Object, Object, Object, ] @ :0

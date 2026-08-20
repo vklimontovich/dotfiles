@@ -217,6 +217,65 @@ _claude_profile_dir() {
   echo "${dir%/}"
 }
 
+# Resolve a profile's optional home_dir — the directory claude should launch
+# from. Looked up in ~/.claude-profiles.yaml; the default profile has none.
+# Prints the expanded path (no trailing slash), or nothing if unset.
+_claude_profile_home() {
+  local config="$HOME/.claude-profiles.yaml" home
+  [ "$1" = "default" ] && return 0
+  home=$(yq -r ".[] | select(.name == \"$1\") | .home_dir // \"\"" "$config" 2>/dev/null)
+  [ -z "$home" ] || [ "$home" = "null" ] && return 0
+  home="${home/#\~/$HOME}"
+  echo "${home%/}"
+}
+
+# _claude_cd_home — cd into a profile's home_dir unless we're already inside it.
+# No-op when the profile has no home_dir. Warns and stays put if the dir is
+# missing rather than failing the launch.
+_claude_cd_home() {
+  local home; home=$(_claude_profile_home "$1")
+  [ -z "$home" ] && return 0
+  case "$PWD/" in
+    "$home"/*) return 0 ;;  # already inside home_dir (or at it)
+  esac
+  if [ ! -d "$home" ]; then
+    echo "⚠️  Profile home_dir does not exist: $home — staying in $PWD" >&2
+    return 0
+  fi
+  cd "$home" || return 1
+  echo "📂 cd $home" >&2
+}
+
+# _claude_create_profile — offer to register an unknown profile in
+# ~/.claude-profiles.yaml, mapping it to ~/.claude-profiles/<name>/. Asks for
+# confirmation on a TTY; refuses non-interactively so a typo'd name in a script
+# still fails loudly instead of silently spawning a logged-out profile.
+_claude_create_profile() {
+  local name="$1" config="$HOME/.claude-profiles.yaml" dir reply
+  dir="$HOME/.claude-profiles/$name"
+  case "$name" in
+    ''|*[!A-Za-z0-9._-]*|.*|-*)
+      echo "⚠️  Invalid Claude profile name: $name" >&2
+      return 1 ;;
+  esac
+  if [ ! -t 2 ] || [ ! -r /dev/tty ]; then
+    echo "⚠️  Unknown Claude profile: $name" >&2
+    echo "    Add it to $config to create it." >&2
+    return 1
+  fi
+  printf '⚠️  Unknown Claude profile: %s\n    Create it at ~/.claude-profiles/%s/? [y/N] ' "$name" "$name" >&2
+  read -r reply < /dev/tty
+  case "$reply" in
+    y|Y|yes|Yes|YES) ;;
+    *) echo "Aborted." >&2; return 1 ;;
+  esac
+  mkdir -p "$dir" || return 1
+  # Keep the YAML list well-formed if the file doesn't end in a newline.
+  [ -s "$config" ] && [ "$(tail -c1 "$config" | wc -l)" -eq 0 ] && printf '\n' >> "$config"
+  printf -- '- name: %s\n  dir: ~/.claude-profiles/%s/\n' "$name" "$name" >> "$config"
+  echo "✅ Created profile '$name' → ~/.claude-profiles/$name/ — log in when Claude starts." >&2
+}
+
 # Print a tab-separated table of claude profiles (header + one row per profile).
 # Plan, billing, and account are read straight from each profile's
 # <dir>/.claude.json oauthAccount — no need to launch claude. A profile whose
@@ -258,17 +317,33 @@ claude-profiles() {
 }
 
 # claude — wrapper that picks a config profile before launching the CLI.
-# Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }. A dir
-# of ~/.claude runs claude natively (CLAUDE_CONFIG_DIR stays unset). Set
-# CLAUDE_PROFILE to skip the picker (e.g. CLAUDE_PROFILE=pp claude). Needs
-# yq + fzf + jq; if a dep is missing it prints a banner and runs claude as-is.
-# The picker shows each profile's plan, billing mode, account, and config dir.
+# Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }, each an
+# isolated CLAUDE_CONFIG_DIR. Choose one with --profile NAME / -P NAME, the
+# CLAUDE_PROFILE env var (e.g. CLAUDE_PROFILE=pp claude), or the interactive
+# picker; an explicit flag wins. claude's own -p/--print is left untouched.
+# Needs yq + fzf + jq; if a dep is missing it prints a banner and runs claude
+# as-is. The picker shows each profile's plan, billing mode, account, and dir.
+# An explicitly named profile that doesn't exist yet prompts to create it.
 # Adds --dangerously-skip-permissions when launching a session (no args, flags
 # like -r, or a prompt) — but not for subcommands, which don't accept it.
 claude() {
   local config="$HOME/.claude-profiles.yaml"
-  local -a names
-  local profile dir arg
+  local -a names args
+  local profile dir arg flag_profile=""
+
+  # Pull an explicit profile out of the args: --profile NAME | --profile=NAME
+  # | -P NAME | -P=NAME. Everything else is forwarded to claude untouched, so
+  # claude's own -p/--print keeps working. An explicit flag beats CLAUDE_PROFILE
+  # and the picker.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile=*|-P=*) flag_profile="${1#*=}"; shift ;;
+      --profile|-P)
+        if [ $# -ge 2 ]; then flag_profile="$2"; shift 2; else shift; fi ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]}"
 
   # Skip permission prompts for sessions; subcommands reject the flag.
   case "$1" in
@@ -305,7 +380,9 @@ claude() {
     return
   fi
 
-  if [ -n "$CLAUDE_PROFILE" ]; then
+  if [ -n "$flag_profile" ]; then
+    profile="$flag_profile"
+  elif [ -n "$CLAUDE_PROFILE" ]; then
     profile="$CLAUDE_PROFILE"
   elif [ ${#names[@]} -eq 1 ]; then
     profile="${names[@]:0:1}"
@@ -323,9 +400,12 @@ claude() {
 
   dir=$(_claude_profile_dir "$profile")
   if [ -z "$dir" ]; then
-    echo "⚠️  Unknown Claude profile: $profile" >&2
-    return 1
+    _claude_create_profile "$profile" || return 1
+    dir=$(_claude_profile_dir "$profile") || return 1
   fi
+
+  # cd into the profile's home_dir (if any) unless we're already inside it.
+  _claude_cd_home "$profile" || return 1
 
   # ~/.claude is claude's native home: leave CLAUDE_CONFIG_DIR unset so it
   # reads ~/.claude.json (pointing CLAUDE_CONFIG_DIR at ~/.claude would read
@@ -338,4 +418,132 @@ claude() {
 
   echo "🤖 Claude profile: $profile ($dir)" >&2
   CLAUDE_CONFIG_DIR="$dir" command claude "$@"
+}
+
+# _codex_dep_banner — warn that a profile-picker dependency is missing.
+_codex_dep_banner() {
+  local dep="$1" hint="$2"
+  echo "⚠️  Codex profiles need '$dep', which isn't installed — running the default profile." >&2
+  echo "    Install it: $hint" >&2
+}
+
+# Resolve a Codex profile name to its CODEX_HOME. "default" maps to ~/.codex;
+# anything else is looked up in ~/.codex-profiles.yaml. An entry may use
+# "dir: default" to alias the default profile under another name.
+_codex_profile_dir() {
+  local config="$HOME/.codex-profiles.yaml" dir
+  if [ "$1" = "default" ]; then
+    echo "$HOME/.codex"
+    return 0
+  fi
+  dir=$(yq -r ".[] | select(.name == \"$1\") | .dir" "$config" 2>/dev/null)
+  [ -z "$dir" ] || [ "$dir" = "null" ] && return 1
+  if [ "$dir" = "default" ]; then
+    echo "$HOME/.codex"
+    return 0
+  fi
+  dir="${dir/#\~/$HOME}"
+  echo "${dir%/}"
+}
+
+# Print a tab-separated table of Codex profiles. Codex auth files intentionally
+# do not expose account or plan metadata, so the picker shows the profile and
+# its isolated CODEX_HOME only.
+_codex_profiles_table() {
+  local config="$HOME/.codex-profiles.yaml"
+  local -a names
+  local n d disp
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  printf 'PROFILE\tDIR\n'
+  for n in "${names[@]}"; do
+    d=$(_codex_profile_dir "$n") || continue
+    disp="$d"; case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
+    printf '%s\t%s\n' "$n" "$disp"
+  done
+}
+
+# codex-profiles — print the profile table without launching anything.
+codex-profiles() {
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "codex-profiles needs yq — run: brew install yq" >&2
+    return 1
+  fi
+  [ -f "$HOME/.codex-profiles.yaml" ] || { echo "No ~/.codex-profiles.yaml" >&2; return 1; }
+  _codex_profiles_table | column -t -s $'\t'
+}
+
+# codex — wrapper that picks an isolated CODEX_HOME before launching the CLI.
+# Profiles live in ~/.codex-profiles.yaml as a list of { name, dir }. Choose
+# one with --profile NAME / -P NAME, CODEX_PROFILE (for example
+# CODEX_PROFILE=pp codex), or the interactive picker; an explicit flag wins.
+# Codex's native lower-case -p/--profile config-layer option remains available
+# as -p, while this wrapper consumes only --profile and -P.
+codex() {
+  local config="$HOME/.codex-profiles.yaml"
+  local -a names args
+  local profile dir flag_profile=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile=*|-P=*) flag_profile="${1#*=}"; shift ;;
+      --profile|-P)
+        if [ $# -ge 2 ]; then flag_profile="$2"; shift 2; else shift; fi ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]}"
+
+  if [ ! -f "$config" ]; then
+    command codex "$@"
+    return
+  fi
+
+  if ! command -v yq >/dev/null 2>&1; then
+    _codex_dep_banner yq "brew install yq"
+    command codex "$@"
+    return
+  fi
+
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  if [ ${#names[@]} -eq 0 ]; then
+    command codex "$@"
+    return
+  fi
+
+  if [ -n "$flag_profile" ]; then
+    profile="$flag_profile"
+  elif [ -n "$CODEX_PROFILE" ]; then
+    profile="$CODEX_PROFILE"
+  elif [ ${#names[@]} -eq 1 ]; then
+    profile="${names[@]:0:1}"
+  elif ! command -v fzf >/dev/null 2>&1; then
+    _codex_dep_banner fzf "brew install fzf"
+    command codex "$@"
+    return
+  else
+    profile=$(_codex_profiles_table | column -t -s $'\t' |
+      fzf --ansi --no-sort --no-mouse --header-lines=1 \
+          --prompt="Select Codex profile > " --height=~30 --reverse |
+      awk '{print $1}')
+    [ -z "$profile" ] && return 1
+  fi
+
+  dir=$(_codex_profile_dir "$profile")
+  if [ -z "$dir" ]; then
+    echo "⚠️  Unknown Codex profile: $profile" >&2
+    return 1
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "⚠️  Codex profile directory does not exist: $dir" >&2
+    return 1
+  fi
+
+  if [ "$dir" = "$HOME/.codex" ]; then
+    echo "🤖 Codex profile: $profile" >&2
+    command codex "$@"
+    return
+  fi
+
+  echo "🤖 Codex profile: $profile ($dir)" >&2
+  CODEX_HOME="$dir" command codex "$@"
 }

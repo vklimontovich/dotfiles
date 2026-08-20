@@ -1,0 +1,294 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - link "Jitsu home" [ref=e5] [cursor=pointer]:
+          - /url: /
+          - generic [ref=e6]:
+            - img [ref=e8]
+            - img [ref=e12]
+        - navigation [ref=e18]:
+          - link "Documentation" [ref=e19] [cursor=pointer]:
+            - /url: /docs
+          - link "Management API" [ref=e20] [cursor=pointer]:
+            - /url: /docs/management-api
+        - generic [ref=e21]:
+          - button "Search ⌘K" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+            - generic [ref=e26]: Search
+            - generic [ref=e27]: ⌘K
+          - link "Get Started" [ref=e28] [cursor=pointer]:
+            - /url: https://use.jitsu.com
+    - generic [ref=e29]:
+      - complementary [ref=e30]:
+        - navigation [ref=e31]:
+          - generic [ref=e32]:
+            - generic [ref=e33]:
+              - img [ref=e34]
+              - generic [ref=e39]: Get Started
+            - list [ref=e40]:
+              - listitem [ref=e41]:
+                - link "Introduction" [ref=e42] [cursor=pointer]:
+                  - /url: /docs
+              - listitem [ref=e43]:
+                - link "Quickstart" [ref=e44] [cursor=pointer]:
+                  - /url: /docs/quick-start
+              - listitem [ref=e45]:
+                - link "Core concepts" [ref=e46] [cursor=pointer]:
+                  - /url: /docs/core-concepts
+              - listitem [ref=e47]:
+                - link "Management API" [ref=e48] [cursor=pointer]:
+                  - /url: /docs/api
+          - generic [ref=e49]:
+            - generic [ref=e50]:
+              - img [ref=e51]
+              - generic [ref=e54]: Sending Data
+            - list [ref=e55]:
+              - listitem [ref=e56]:
+                - link "Overview" [ref=e57] [cursor=pointer]:
+                  - /url: /docs/sending-data
+              - listitem [ref=e58]:
+                - button "JavaScript Reference" [ref=e60] [cursor=pointer]:
+                  - generic [ref=e61]: JavaScript Reference
+                  - img [ref=e62]
+              - listitem [ref=e64]:
+                - link "HTML snippet" [ref=e65] [cursor=pointer]:
+                  - /url: /docs/sending-data/html
+              - listitem [ref=e66]:
+                - link "HTTP API" [ref=e67] [cursor=pointer]:
+                  - /url: /docs/sending-data/http
+              - listitem [ref=e68]:
+                - link "Pixel API" [ref=e69] [cursor=pointer]:
+                  - /url: /docs/sending-data/pixel
+              - listitem [ref=e70]:
+                - link "NPM Package" [ref=e71] [cursor=pointer]:
+                  - /url: /docs/sending-data/npm
+              - listitem [ref=e72]:
+                - link "React" [ref=e73] [cursor=pointer]:
+                  - /url: /docs/sending-data/react
+              - listitem [ref=e74]:
+                - link "React Native" [ref=e75] [cursor=pointer]:
+                  - /url: /docs/sending-data/react-native
+              - listitem [ref=e76]:
+                - link "iOS" [ref=e77] [cursor=pointer]:
+                  - /url: /docs/sending-data/ios
+              - listitem [ref=e78]:
+                - link "Android" [ref=e79] [cursor=pointer]:
+                  - /url: /docs/sending-data/android
+              - listitem [ref=e80]:
+                - link "Segment Proxy" [ref=e81] [cursor=pointer]:
+                  - /url: /docs/sending-data/segment-proxy
+              - listitem [ref=e82]:
+                - link "Consent Management" [ref=e83] [cursor=pointer]:
+                  - /url: /docs/sending-data/consent-management
+              - listitem [ref=e84]:
+                - link "Server to Server" [ref=e85] [cursor=pointer]:
+                  - /url: /docs/sending-data/server-to-server
+          - generic [ref=e86]:
+            - generic [ref=e87]:
+              - img [ref=e88]
+              - generic [ref=e92]: Functions
+            - list [ref=e93]:
+              - listitem [ref=e94]:
+                - link "Overview" [ref=e95] [cursor=pointer]:
+                  - /url: /docs/functions
+              - listitem [ref=e96]:
+                - link "Functions Runtime" [ref=e97] [cursor=pointer]:
+                  - /url: /docs/functions/runtime
+              - listitem [ref=e98]:
+                - link "Pipeline" [ref=e99] [cursor=pointer]:
+                  - /url: /docs/functions/pipeline
+              - listitem [ref=e100]:
+                - link "Advanced" [ref=e101] [cursor=pointer]:
+                  - /url: /docs/functions/advanced
+              - listitem [ref=e102]:
+                - link "Command-line SDK" [ref=e103] [cursor=pointer]:
+                  - /url: /docs/functions/sdk
+          - generic [ref=e104]:
+            - generic [ref=e105]:
+              - img [ref=e106]
+              - generic [ref=e110]: Destinations
+            - list [ref=e111]:
+              - listitem [ref=e112]:
+                - link "All Destinations" [ref=e113] [cursor=pointer]:
+                  - /url: /docs/destinations/catalog
+              - listitem [ref=e114]:
+                - button "Warehouses" [ref=e116] [cursor=pointer]:
+                  - generic [ref=e117]: Warehouses
+                  - img [ref=e118]
+              - listitem [ref=e120]:
+                - button "Block Storages" [ref=e122] [cursor=pointer]:
+                  - generic [ref=e123]: Block Storages
+                  - img [ref=e124]
+              - listitem [ref=e126]:
+                - link "Amplitude" [ref=e127] [cursor=pointer]:
+                  - /url: /docs/destinations/amplitude
+              - listitem [ref=e128]:
+                - link "Google Analytics 4 (Cloud)" [ref=e129] [cursor=pointer]:
+                  - /url: /docs/destinations/ga4
+              - listitem [ref=e130]:
+                - link "Google Analytics 4 (Device)" [ref=e131] [cursor=pointer]:
+                  - /url: /docs/destinations/ga4-tag
+              - listitem [ref=e132]:
+                - link "Hubspot" [ref=e133] [cursor=pointer]:
+                  - /url: /docs/destinations/hubspot
+              - listitem [ref=e134]:
+                - link "Mixpanel" [ref=e135] [cursor=pointer]:
+                  - /url: /docs/destinations/mixpanel
+              - listitem [ref=e136]:
+                - link "Posthog" [ref=e137] [cursor=pointer]:
+                  - /url: /docs/destinations/posthog
+              - listitem [ref=e138]:
+                - link "Salesforce" [ref=e139] [cursor=pointer]:
+                  - /url: /docs/destinations/salesforce
+              - listitem [ref=e140]:
+                - link "Tag" [ref=e141] [cursor=pointer]:
+                  - /url: /docs/destinations/tag
+              - listitem [ref=e142]:
+                - link "Webhook" [ref=e143] [cursor=pointer]:
+                  - /url: /docs/destinations/webhook
+          - generic [ref=e144]:
+            - generic [ref=e145]:
+              - img [ref=e146]
+              - generic [ref=e148]: Features
+            - list [ref=e149]:
+              - listitem [ref=e150]:
+                - link "Custom Domains" [ref=e151] [cursor=pointer]:
+                  - /url: /docs/features/custom-domains
+              - listitem [ref=e152]:
+                - link "Deduplication" [ref=e153] [cursor=pointer]:
+                  - /url: /docs/features/deduplication
+              - listitem [ref=e154]:
+                - link "Identity Stitching" [ref=e155] [cursor=pointer]:
+                  - /url: /docs/features/identity-stitching
+              - listitem [ref=e156]:
+                - link "Live Events" [ref=e157] [cursor=pointer]:
+                  - /url: /docs/features/live-events
+              - listitem [ref=e158]:
+                - link "Profiles" [ref=e159] [cursor=pointer]:
+                  - /url: /docs/features/profiles
+              - listitem [ref=e160]:
+                - link "Provisioned ClickHouse" [ref=e161] [cursor=pointer]:
+                  - /url: /docs/features/provisioned-warehouse
+              - listitem [ref=e162]:
+                - link "Schema Management" [ref=e163] [cursor=pointer]:
+                  - /url: /docs/features/schema
+              - listitem [ref=e164]:
+                - link "Sessions" [ref=e165] [cursor=pointer]:
+                  - /url: /docs/features/sessions
+          - generic [ref=e166]:
+            - generic [ref=e167]:
+              - img [ref=e168]
+              - generic [ref=e170]: Jitsu CLI
+            - list [ref=e171]:
+              - listitem [ref=e172]:
+                - link "Overview" [ref=e173] [cursor=pointer]:
+                  - /url: /docs/jitsu-cli
+              - listitem [ref=e174]:
+                - link "Authentication" [ref=e175] [cursor=pointer]:
+                  - /url: /docs/jitsu-cli/auth
+              - listitem [ref=e176]:
+                - link "Manage configuration" [ref=e177] [cursor=pointer]:
+                  - /url: /docs/jitsu-cli/config
+          - generic [ref=e178]:
+            - generic [ref=e179]:
+              - img [ref=e180]
+              - generic [ref=e183]: Self-hosting
+            - list [ref=e184]:
+              - listitem [ref=e185]:
+                - link "Overview" [ref=e186] [cursor=pointer]:
+                  - /url: /docs/self-hosting
+              - listitem [ref=e187]:
+                - button "Quick Start" [ref=e189] [cursor=pointer]:
+                  - generic [ref=e190]: Quick Start
+                  - img [ref=e191]
+              - listitem [ref=e193]:
+                - link "Production Deployment Guide" [ref=e194] [cursor=pointer]:
+                  - /url: /docs/self-hosting/production-deployment
+              - listitem [ref=e195]:
+                - link "Configuration Reference" [ref=e196] [cursor=pointer]:
+                  - /url: /docs/self-hosting/configuration
+          - generic [ref=e197]:
+            - generic [ref=e198]:
+              - img [ref=e199]
+              - generic [ref=e201]: Jitsu Cloud
+            - list [ref=e202]:
+              - listitem [ref=e203]:
+                - link "IP addresses" [ref=e204] [cursor=pointer]:
+                  - /url: /docs/cloud/ip-addresses
+          - generic [ref=e205]:
+            - generic [ref=e206]:
+              - img [ref=e207]
+              - generic [ref=e211]: Jitsu Classic
+            - list [ref=e212]:
+              - listitem [ref=e213]:
+                - link "Overview" [ref=e214] [cursor=pointer]:
+                  - /url: /docs/migration-from-classic
+              - listitem [ref=e215]:
+                - link "Migration guide" [ref=e216] [cursor=pointer]:
+                  - /url: /docs/migration-from-classic/step-by-step
+              - listitem [ref=e217]:
+                - link "What has changed in Jitsu 2.0" [ref=e218] [cursor=pointer]:
+                  - /url: /docs/migration-from-classic/what-changed
+      - generic [ref=e220]:
+        - generic [ref=e221]:
+          - heading "Documentation" [level=1] [ref=e222]
+          - paragraph [ref=e223]: Everything you need to capture event data with Jitsu — from your first event to self-hosting at scale.
+        - generic [ref=e224]:
+          - link "Quickstart Create your first Jitsu instance, add a site, and send your first event in minutes." [ref=e225] [cursor=pointer]:
+            - /url: /docs/quick-start
+            - generic [ref=e226]:
+              - img [ref=e228]
+              - generic [ref=e233]:
+                - text: Quickstart
+                - img [ref=e234]
+            - paragraph [ref=e236]: Create your first Jitsu instance, add a site, and send your first event in minutes.
+          - link "Core concepts Understand sites, destinations, connections, and how data flows through Jitsu." [ref=e237] [cursor=pointer]:
+            - /url: /docs/core-concepts
+            - generic [ref=e238]:
+              - img [ref=e240]
+              - generic [ref=e250]:
+                - text: Core concepts
+                - img [ref=e251]
+            - paragraph [ref=e253]: Understand sites, destinations, connections, and how data flows through Jitsu.
+          - link "Sending data Instrument your web, mobile, and server apps with our SDKs and HTTP APIs." [ref=e254] [cursor=pointer]:
+            - /url: /docs/sending-data
+            - generic [ref=e255]:
+              - img [ref=e257]
+              - generic [ref=e260]:
+                - text: Sending data
+                - img [ref=e261]
+            - paragraph [ref=e263]: Instrument your web, mobile, and server apps with our SDKs and HTTP APIs.
+          - link "Destinations Stream and batch your events into warehouses, block storage, and downstream tools." [ref=e264] [cursor=pointer]:
+            - /url: /docs/destinations/catalog
+            - generic [ref=e265]:
+              - img [ref=e267]
+              - generic [ref=e271]:
+                - text: Destinations
+                - img [ref=e272]
+            - paragraph [ref=e274]: Stream and batch your events into warehouses, block storage, and downstream tools.
+          - link "Functions Filter, transform, and enrich events with TypeScript functions before they land." [ref=e275] [cursor=pointer]:
+            - /url: /docs/functions
+            - generic [ref=e276]:
+              - img [ref=e278]
+              - generic [ref=e282]:
+                - text: Functions
+                - img [ref=e283]
+            - paragraph [ref=e285]: Filter, transform, and enrich events with TypeScript functions before they land.
+          - link "Management API Manage workspaces, destinations, and connections programmatically." [ref=e286] [cursor=pointer]:
+            - /url: /docs/management-api
+            - generic [ref=e287]:
+              - img [ref=e289]
+              - generic [ref=e293]:
+                - text: Management API
+                - img [ref=e294]
+            - paragraph [ref=e296]: Manage workspaces, destinations, and connections programmatically.
+          - link "Self-hosting Run Jitsu yourself with Docker Compose or Helm, fully under your control." [ref=e297] [cursor=pointer]:
+            - /url: /docs/self-hosting
+            - generic [ref=e298]:
+              - img [ref=e300]
+              - generic [ref=e303]:
+                - text: Self-hosting
+                - img [ref=e304]
+            - paragraph [ref=e306]: Run Jitsu yourself with Docker Compose or Helm, fully under your control.
+  - alert [ref=e307]
