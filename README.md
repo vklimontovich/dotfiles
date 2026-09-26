@@ -32,6 +32,12 @@ What I actually use day-to-day, and where to look in the repo.
   pickers in `bin/commonrc`: use `--profile <name>` / `-P <name>`,
   `CLAUDE_PROFILE` / `CODEX_PROFILE`, or the interactive picker. Codex keeps
   each profile in an isolated `CODEX_HOME` under `~/.codex-profiles/`.
+  `dotfiles claude-hooks` wires `bin/cc-hook` into every Claude profile:
+  the zellij tab reads `cc:<session>` (the `/rename` title, else Claude's auto
+  title), gets a `●` when Claude waits on you in a background tab, and desktop
+  notifications show the session plus an excerpt of Claude's question or reply,
+  with the Claude icon (a renamed terminal-notifier copy in `~/Applications`).
+  Clicking one jumps to the pane. Needs zellij ≥ 0.44 (`rename-tab --tab-id`).
 - **[Git](https://git-scm.com/)** — `.gitconfig` (identity, LFS, Kaleidoscope
   diff/merge), `.gitignore_global`, and `.config/git/ignore`. Machine paths use
   `~` so the same config works on Linux remotes.

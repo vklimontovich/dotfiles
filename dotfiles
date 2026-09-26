@@ -160,6 +160,124 @@ cmd_check() {
     else
         log "MISS" "fzf: not installed"
     fi
+
+    if command -v terminal-notifier >/dev/null 2>&1; then
+        log "OK" "terminal-notifier: $(terminal-notifier -version 2>/dev/null | head -1)"
+    else
+        log "MISS" "terminal-notifier: not installed (brew install terminal-notifier)"
+    fi
+}
+
+# Claude Code events that run bin/cc-hook.
+CC_HOOK_EVENTS='["SessionStart","UserPromptSubmit","Notification","PermissionRequest","Stop"]'
+CC_NOTIFIER_APP="$HOME/Applications/Claude Code Notifier.app"
+
+# Build "Claude Code Notifier.app": a copy of terminal-notifier.app carrying
+# Claude's icon and its own bundle id. macOS shows the posting app's icon on a
+# notification, and terminal-notifier dropped -sender, so a renamed copy is the
+# way to get the Claude icon. Rebuilt only when terminal-notifier changes, since
+# a rebuild can make macOS ask for notification permission again.
+_cc_build_notifier() {
+    local tn src icon ver have pb=/usr/libexec/PlistBuddy
+    tn=$(command -v terminal-notifier) || {
+        log "MISS" "terminal-notifier: not installed (brew install terminal-notifier); cc-hook falls back to osascript"
+        return 0
+    }
+    src=$(cd "$(dirname "$(readlink -f "$tn")")/.." && ls -d "$PWD"/terminal-notifier.app 2>/dev/null)
+    icon=/Applications/Claude.app/Contents/Resources/electron.icns
+    if [ ! -d "$src" ] || [ ! -f "$icon" ]; then
+        log "WARN" "need terminal-notifier.app and Claude.app to build $(_cc_disp "$CC_NOTIFIER_APP"); skipping"
+        return 0
+    fi
+    ver=$($pb -c "Print :CFBundleShortVersionString" "$src/Contents/Info.plist")
+    have=$($pb -c "Print :CFBundleShortVersionString" "$CC_NOTIFIER_APP/Contents/Info.plist" 2>/dev/null)
+    if [ "$ver" = "$have" ]; then
+        log "OK" "$(_cc_disp "$CC_NOTIFIER_APP") (terminal-notifier $ver)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$CC_NOTIFIER_APP")"
+    rm -rf "$CC_NOTIFIER_APP"
+    cp -R "$src" "$CC_NOTIFIER_APP"
+    rm -f "$CC_NOTIFIER_APP"/Contents/Resources/*.icns
+    cp "$icon" "$CC_NOTIFIER_APP/Contents/Resources/Claude.icns"
+    $pb -c "Set :CFBundleIdentifier com.klimontovich.cc-notify" \
+        -c "Set :CFBundleName Claude Code" \
+        -c "Set :CFBundleIconFile Claude" \
+        -c "Add :CFBundleDisplayName string Claude Code" \
+        "$CC_NOTIFIER_APP/Contents/Info.plist"
+    codesign --force --deep -s - "$CC_NOTIFIER_APP" 2>/dev/null
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$CC_NOTIFIER_APP"
+    # The first post through LaunchServices triggers the permission prompt.
+    open -n "$CC_NOTIFIER_APP" --args -title "Claude Code" -message "Notifications are set up"
+    log "BUILD" "$(_cc_disp "$CC_NOTIFIER_APP") (terminal-notifier $ver) — allow notifications if macOS asks"
+}
+
+_cc_disp() {
+    local p="$1"
+    case "$p" in "$HOME"/*) p="~${p#$HOME}";; esac
+    printf '%s\n' "$p"
+}
+
+# Every Claude config dir: each dir in ~/.claude-profiles.yaml plus the native
+# ~/.claude, deduped ("dir: default" is the native one).
+_cc_profile_dirs() {
+    local d config="$HOME/.claude-profiles.yaml"
+    {
+        if [ -f "$config" ] && command -v yq >/dev/null 2>&1; then
+            yq -r '.[].dir' "$config" 2>/dev/null
+        fi
+        [ -d "$HOME/.claude" ] && echo "$HOME/.claude"
+    } | while IFS= read -r d; do
+        case "$d" in ""|null) continue ;; default) d="$HOME/.claude" ;; esac
+        d="${d/#\~/$HOME}"
+        printf '%s\n' "${d%/}"
+    done | awk '!seen[$0]++'
+}
+
+# Point every profile's settings.json at bin/cc-hook (session-named zellij tabs
+# + desktop notifications). Replaces earlier cc-hook entries and the old
+# osascript "Claude needs your attention" hook; leaves other hooks alone.
+cmd_claude_hooks() {
+    if ! command -v jq >/dev/null 2>&1; then
+        log "ERROR" "jq not installed (brew install jq)"
+        return 1
+    fi
+    _cc_build_notifier
+
+    local d f disp tmp
+    while IFS= read -r d; do
+        f="$d/settings.json"
+        disp=$(_cc_disp "$f")
+        mkdir -p "$d"
+        [ -s "$f" ] || echo '{}' > "$f"
+        tmp="$f.$(rand_str).tmp"
+        if ! jq --argjson events "$CC_HOOK_EVENTS" '
+            def ours: (.command // "") | test("cc-hook|osascript.*Claude needs your attention");
+            .hooks //= {}
+            | .hooks |= with_entries(
+                .value |= (map(.hooks |= map(select(ours | not)))
+                           | map(select((.hooks // []) | length > 0))))
+            | .hooks |= with_entries(select(.value | length > 0))
+            | reduce $events[] as $e (.;
+                .hooks[$e] += [
+                    (if $e == "PermissionRequest" then {matcher: "*"} else {} end)
+                    + {hooks: [{type: "command",
+                                command: ("\"$HOME/bin/cc-hook\" " + $e),
+                                timeout: 10}]}])
+            ' "$f" > "$tmp"; then
+            rm -f "$tmp"
+            log "ERROR" "$disp: not valid JSON; skipped"
+            continue
+        fi
+        if cmp -s "$tmp" "$f"; then
+            rm -f "$tmp"
+            log "OK" "$disp (cc-hook already set)"
+        else
+            cat "$tmp" > "$f"   # write through, keeping symlinks and mode
+            rm -f "$tmp"
+            log "HOOKS" "$disp"
+        fi
+    done < <(_cc_profile_dirs)
 }
 
 cmd_init() {
@@ -564,9 +682,13 @@ Usage: dotfiles <command>
 
 Commands:
   init                      Symlink dotfiles into \$HOME (idempotent)
-  check                     Print status: shell, zellij, oh-my-zsh, fzf
+  check                     Print status: shell, zellij, oh-my-zsh, fzf,
+                            terminal-notifier
   agents                    Clone/update ~/agents and reference it from each
                             profile's CLAUDE.md (idempotent)
+  claude-hooks              Wire bin/cc-hook into every Claude profile:
+                            zellij tabs named cc:<session> and desktop
+                            notifications with the Claude icon (idempotent)
   deploy <server> [opts]    Rsync dotfiles to a remote and run init there.
                             <server> is an ssh target: a host alias or
                             user@host (e.g. jitsu005@jitsu005).
@@ -595,6 +717,7 @@ case "${1:-}" in
     check)             shift; cmd_check "$@" ;;
     deploy)            shift; cmd_deploy "$@" ;;
     agents)            shift; cmd_agents "$@" ;;
+    claude-hooks)      shift; cmd_claude_hooks "$@" ;;
     -h|--help|help|"") usage ;;
     *) log "ERROR" "unknown command: $1"; usage; exit 1 ;;
 esac

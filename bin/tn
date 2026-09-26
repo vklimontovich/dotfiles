@@ -5,12 +5,18 @@
 #   tn --cmd <c>    auto with command context (intended for preexec hook)
 #   tn <name>       manual: rename and latch (auto calls become no-ops)
 #   tn --reset      clear latch (and drift marker) so auto resumes
+#   tn --claude <name> [--tab-id <id>]
+#                   set by Claude's cc-hook: rename (by id: works on a tab in
+#                   the background), unless latched or drifted
 #
 # State files keyed by (zellij session, parent shell PID), under
 # ${TMPDIR:-/tmp}/zellij-tn. macOS sets TMPDIR to a per-user dir; Linux
 # usually doesn't, so it falls back to /tmp. Files:
 #   <key>.lock — present when manually latched
 #   <key>.last — name we last applied (drift detection)
+#
+# The shell PID is $TN_SHELL_PID when set: the claude wrapper exports it so
+# hooks running under claude share the state of the shell that launched it.
 #
 # Drift detection: if the focused tab's current name differs from `.last`, the
 # tab was renamed by someone other than us — back off until --reset.
@@ -21,7 +27,7 @@ set -u
 MAXLEN=24
 STATE_DIR="${TMPDIR:-/tmp}/zellij-tn"
 mkdir -p "$STATE_DIR"
-KEY="${ZELLIJ_SESSION_NAME:-default}-$PPID"
+KEY="${ZELLIJ_SESSION_NAME:-default}-${TN_SHELL_PID:-$PPID}"
 LOCK="$STATE_DIR/$KEY.lock"
 LAST="$STATE_DIR/$KEY.last"
 
@@ -66,7 +72,7 @@ derive_for_cmd() {
     first=${cmd%% *}
     first=${first##*/}
     case $first in
-        claude) printf 'claude · %s' "$(cwd_name)" ;;
+        claude) printf 'cc:%s' "$(cwd_name)" ;;
         codex)  printf 'codex · %s'  "$(cwd_name)" ;;
         ssh)
             local h
@@ -95,19 +101,25 @@ focused_tab() {
         }'
 }
 
-drifted() {
-    [[ -f $LAST ]] || return 1
-    local last_set focused
-    last_set=$(cat "$LAST")
-    focused=$(focused_tab)
-    [[ -n $focused && $focused != "$last_set" ]]
+tab_name_by_id() {
+    zellij action list-tabs --json 2>/dev/null |
+        jq -r --argjson id "$1" '.[] | select(.tab_id == $id) | .name'
 }
 
+# drifted [tab-id] — checks the focused tab, or the given one.
+drifted() {
+    [[ -f $LAST ]] || return 1
+    local last_set current
+    last_set=$(cat "$LAST")
+    if [[ -n ${1:-} ]]; then current=$(tab_name_by_id "$1"); else current=$(focused_tab); fi
+    [[ -n $current && $current != "$last_set" ]]
+}
+
+# apply <name> [tab-id] — rename the focused tab, or the given one.
 apply() {
-    local raw=$1 name
-    name=$(middle_trunc "$raw" "$MAXLEN")
+    local name=$1 tab_id=${2:-}
     [[ -f $LAST && "$(cat "$LAST")" == "$name" ]] && return 0
-    if zellij action rename-tab "$name" 2>/dev/null; then
+    if zellij action rename-tab ${tab_id:+--tab-id "$tab_id"} "$name" 2>/dev/null; then
         printf '%s' "$name" > "$LAST"
     fi
 }
@@ -125,13 +137,21 @@ apply_auto() {
             name=$(cwd_name)
         fi
     fi
-    apply "$name"
+    apply "$(middle_trunc "$name" "$MAXLEN")"
 }
 
 case "${1:-}" in
     --reset)
         rm -f "$LOCK" "$LAST"
         apply_auto
+        ;;
+    --claude)
+        name=${2:-} tab_id=""
+        [[ ${3:-} == --tab-id ]] && tab_id=${4:-}
+        [[ -n $name ]] || exit 1
+        [[ -e $LOCK ]] && exit 0
+        drifted "$tab_id" && exit 0
+        apply "$name" "$tab_id"
         ;;
     --cmd)
         [[ -e $LOCK ]] && exit 0
@@ -144,7 +164,7 @@ case "${1:-}" in
         apply_auto
         ;;
     *)
-        apply "$*"
+        apply "$(middle_trunc "$*" "$MAXLEN")"
         : > "$LOCK"
         ;;
 esac

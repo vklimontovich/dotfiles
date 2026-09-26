@@ -316,6 +316,12 @@ claude-profiles() {
   _claude_profiles_table | column -t -s $'\t'
 }
 
+# _claude_run — launch the real CLI. TN_SHELL_PID tells cc-hook's tab renames
+# (via tn) which shell's tn state to share; set per launch, not exported.
+_claude_run() {
+  TN_SHELL_PID=$$ command claude "$@"
+}
+
 # claude — wrapper that picks a config profile before launching the CLI.
 # Profiles live in ~/.claude-profiles.yaml as a list of { name, dir }, each an
 # isolated CLAUDE_CONFIG_DIR. Choose one with --profile NAME / -P NAME, the
@@ -358,25 +364,25 @@ claude() {
 
   # No profiles configured: run claude untouched, no noise.
   if [ ! -f "$config" ]; then
-    command claude "$@"
+    _claude_run "$@"
     return
   fi
 
   # yq reads the profiles; without it the picker can't work.
   if ! command -v yq >/dev/null 2>&1; then
     _claude_dep_banner yq "brew install yq"
-    command claude "$@"
+    _claude_run "$@"
     return
   fi
   if ! command -v jq >/dev/null 2>&1; then
     _claude_dep_banner jq "brew install jq"
-    command claude "$@"
+    _claude_run "$@"
     return
   fi
 
   names=($(yq -r '.[].name' "$config" 2>/dev/null))
   if [ ${#names[@]} -eq 0 ]; then
-    command claude "$@"
+    _claude_run "$@"
     return
   fi
 
@@ -388,7 +394,7 @@ claude() {
     profile="${names[@]:0:1}"
   elif ! command -v fzf >/dev/null 2>&1; then
     _claude_dep_banner fzf "brew install fzf"
-    command claude "$@"
+    _claude_run "$@"
     return
   else
     profile=$(_claude_profiles_table | column -t -s $'\t' |
@@ -412,12 +418,12 @@ claude() {
   # ~/.claude/.claude.json instead, a different and empty config).
   if [ "$dir" = "$HOME/.claude" ]; then
     echo "🤖 Claude profile: $profile" >&2
-    command claude "$@"
+    CLAUDE_PROFILE_NAME="$profile" _claude_run "$@"
     return
   fi
 
   echo "🤖 Claude profile: $profile ($dir)" >&2
-  CLAUDE_CONFIG_DIR="$dir" command claude "$@"
+  CLAUDE_CONFIG_DIR="$dir" CLAUDE_PROFILE_NAME="$profile" _claude_run "$@"
 }
 
 # _codex_dep_banner — warn that a profile-picker dependency is missing.

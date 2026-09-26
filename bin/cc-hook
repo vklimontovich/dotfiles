@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# cc-hook — Claude Code hook: names the zellij tab after the session and posts
+# desktop notifications with the session name and an excerpt of Claude's text.
+#
+#   cc-hook <Event>    hook JSON on stdin; installed into every profile's
+#                      settings.json by `dotfiles claude-hooks`
+#
+# Tab: "cc:<name>", where <name> is the /rename title, else Claude's auto title,
+# else the cwd. Prefixed with "● " when Claude waits on you in a tab you're not
+# looking at; the next prompt clears it. Goes through `tn --claude` so tn's
+# manual latch and drift tracking keep working.
+#
+# Notification: sent unless you're already looking at the pane. Posted by
+# "Claude Code Notifier.app" (terminal-notifier carrying Claude's icon, built by
+# `dotfiles claude-hooks`); clicking it brings Ghostty up on this pane.
+#
+# Never writes to stdout (UserPromptSubmit would feed it to Claude) and always
+# exits 0. Set CC_HOOK_DEBUG=1 to log to ${TMPDIR:-/tmp}/cc-hook.log.
+
+set -u
+event=${1:-}
+input=$(cat)
+if [[ -n ${CC_HOOK_DEBUG:-} ]]; then
+    exec >>"${TMPDIR:-/tmp}/cc-hook.log" 2>&1
+    printf '\n== %s %s\n%s\n' "$(date +%T)" "$event" "$input"
+    set -x
+else
+    exec >/dev/null 2>&1
+fi
+
+NOTIFIER="$HOME/Applications/Claude Code Notifier.app/Contents/MacOS/terminal-notifier"
+TITLE_MAX=28     # tab name, including "cc:"
+BODY_MAX=180
+SOUND_ASK=Ping   # Claude is blocked on you
+SOUND_DONE=Glass # Claude finished its turn
+
+field() { jq -r "$1 // empty" <<<"$input"; }
+session_id=$(field .session_id)
+transcript=$(field .transcript_path)
+cwd=$(field .cwd)
+[[ -n $cwd ]] || cwd=$PWD
+
+# Session name: last /rename title, else last auto title (the same lookup
+# Claude does: the last record of each type wins), else the cwd's basename.
+session_name() {
+    local t=""
+    if [[ -f $transcript ]]; then
+        t=$(LC_ALL=C grep -E '"type":"(custom-title|ai-title)"' "$transcript" |
+            jq -Rrn '[inputs | fromjson?] as $r
+                | ([$r[] | select(.type == "custom-title") | .customTitle] | last)
+                  // ([$r[] | select(.type == "ai-title") | .aiTitle] | last)
+                  // empty')
+    fi
+    [[ -n $t ]] || t=${cwd##*/}
+    printf '%s' "$t"
+}
+
+# Text of Claude's last reply: from the Stop payload, else the transcript.
+last_reply() {
+    local t
+    t=$(jq -r '.last_assistant_message | strings' <<<"$input")
+    if [[ -z $t && -f $transcript ]]; then
+        t=$(tail -n 300 "$transcript" |
+            jq -Rrn '[inputs | fromjson? | select(.type == "assistant")
+                      | .message.content[]? | select(.type == "text") | .text]
+                     | last // empty')
+    fi
+    printf '%s' "$t"
+}
+
+# The part of a reply worth showing: its last paragraph when that asks a
+# question (Claude ends with the question), else its first paragraph.
+excerpt() {
+    local text=$1 para
+    para=$(awk 'BEGIN { RS = "" } NF { last = $0 } END { print last }' <<<"$text")
+    [[ $para == *\?* ]] || para=$(awk 'BEGIN { RS = "" } NF { print; exit }' <<<"$text")
+    oneline "$para" "$BODY_MAX"
+}
+
+# Flatten to one line, drop markdown noise, cut to $2 chars with an ellipsis.
+oneline() {
+    local s max=$2
+    s=$(printf '%s' "$1" | tr '\n\t' '  ' | sed -E 's/[*`#>]+//g; s/ +/ /g; s/^ //; s/ $//')
+    (( ${#s} > max )) && s="${s:0:max-1}…"
+    printf '%s' "$s"
+}
+
+# This pane's tab id, and whether you're looking at the pane: focused in its
+# tab, that tab active in a client, and a terminal app in front.
+tab_id="" viewing=0
+if [[ -n ${ZELLIJ:-} && -n ${ZELLIJ_PANE_ID:-} ]]; then
+    read -r tab_id pane_focused < <(zellij action list-panes --json |
+        jq -r --argjson id "$ZELLIJ_PANE_ID" \
+            '.[] | select(.is_plugin | not) | select(.id == $id) | "\(.tab_id) \(.is_focused)"')
+    if [[ ${pane_focused:-} == true ]] &&
+       zellij action list-tabs --json |
+         jq -e --argjson t "$tab_id" 'any(.[]; .tab_id == $t and .active)' >/dev/null &&
+       lsappinfo info -only name "$(lsappinfo front)" | grep -q -E '"(Ghostty|kitty|Terminal|iTerm2)"'; then
+        viewing=1
+    fi
+fi
+
+# Rename this pane's tab (even in the background) via tn, so tn's latch and
+# drift state stay in sync. TN_SHELL_PID (exported by the claude wrapper) is
+# the shell that launched claude — tn's state key.
+set_tab() {
+    [[ -n $tab_id ]] || return 0
+    local name
+    name=$(oneline "cc:$(session_name)" "$TITLE_MAX")
+    (( $1 )) && name="● $name"
+    "${BASH_SOURCE%/*}/tn" --claude "$name" --tab-id "$tab_id"
+}
+
+notify() {
+    local sound=$1 body=$2 title subtitle profile=${CLAUDE_PROFILE_NAME:-} dir
+    (( viewing )) && return 0
+    title="Claude · $(session_name)"
+    dir=$cwd; [[ $dir == "$HOME"* ]] && dir="~${dir#"$HOME"}"
+    subtitle=${profile:+$profile · }$dir
+    # terminal-notifier rejects values that look like flags or start a quote.
+    [[ $body == [-\[\(\{\"\']* ]] && body="\\$body"
+    local -a args=(-title "$title" -subtitle "$subtitle" -message "$body"
+                   -sound "$sound" -group "cc-$session_id")
+    if [[ -n ${ZELLIJ_SESSION_NAME:-} && -n ${ZELLIJ_PANE_ID:-} ]]; then
+        local zellij; zellij=$(command -v zellij)
+        args+=(-execute "open -a Ghostty; '$zellij' -s '$ZELLIJ_SESSION_NAME' action focus-pane-id terminal_$ZELLIJ_PANE_ID")
+    else
+        args+=(-activate com.mitchellh.ghostty)
+    fi
+    if [[ -x $NOTIFIER ]]; then
+        "$NOTIFIER" "${args[@]}" &
+    elif command -v terminal-notifier >/dev/null; then
+        terminal-notifier "${args[@]}" &
+    else
+        osascript - "$title" "$body" <<'EOF' &
+on run argv
+    display notification (item 2 of argv) with title (item 1 of argv)
+end run
+EOF
+    fi
+}
+
+case $event in
+    SessionStart|UserPromptSubmit)
+        set_tab 0
+        ;;
+    Stop)
+        (( viewing )) && set_tab 0 || set_tab 1
+        notify "$SOUND_DONE" "$(excerpt "$(last_reply)")"
+        ;;
+    PermissionRequest)
+        set_tab $(( ! viewing ))
+        detail=$(jq -r '.tool_input | .command // .file_path // .url // .pattern // .description // empty' <<<"$input")
+        notify "$SOUND_ASK" "$(oneline "$(field .tool_name): $detail" "$BODY_MAX")"
+        ;;
+    Notification)
+        # Permission prompts are covered by PermissionRequest, which has details.
+        [[ $(field .notification_type) == permission_prompt ]] && exit 0
+        set_tab $(( ! viewing ))
+        body=$(excerpt "$(last_reply)")
+        [[ -n $body ]] || body=$(field .message)
+        notify "$SOUND_ASK" "$body"
+        ;;
+esac
+exit 0
