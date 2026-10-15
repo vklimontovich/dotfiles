@@ -1,6 +1,6 @@
 # commonrc-post — sourced from .zshrc *after* oh-my-zsh has loaded.
 # Holds the custom `intheloop` two-line prompt (host, cwd, git status, venv,
-# AWS profile, k8s ctx, last-cmd time, exit status) and zsh fpath tweaks.
+# gcloud config, k8s ctx, last-cmd time, exit status) and zsh fpath tweaks.
 
 # pnpm config persists - run manually if needed:
 # if command -v pnpm >/dev/null 2>&1; then
@@ -11,6 +11,10 @@
 # ZSH-SPECIFIC CONFIGURATIONS
 # ============================================================================
 if [ -n "$ZSH_VERSION" ]; then
+
+  # Drop the oh-my-zsh git plugin's `gp` alias so our gcloud picker (bin/selectors)
+  # is reachable — omz loads after commonrc and would otherwise shadow it.
+  unalias gp 2>/dev/null
 
   # --------------------------------------------------------------------------
   # Completions (ZSH only)
@@ -123,7 +127,8 @@ if [ -n "$ZSH_VERSION" ]; then
       # Build right side
       local right_prompt=""
       right_prompt+="$(virtualenv_prompt_info)"
-      right_prompt+="$(aws_prompt_info)"
+      # right_prompt+="$(aws_prompt_info)"
+      right_prompt+="$(gcloud_prompt_info)"
       right_prompt+="$(k8s_prompt_info)"
       right_prompt+="$(exec_time_prompt_info)"
       right_prompt+="$(exit_status_prompt_info)"
@@ -158,10 +163,22 @@ if [ -n "$ZSH_VERSION" ]; then
       fi
     }
 
-    # AWS profile display
+    # AWS profile display (disabled — replaced by gcloud below)
     aws_prompt_info() {
       if [[ -n "$AWS_PROFILE" ]]; then
         echo -n "%{$fg[yellow]%}aws:$AWS_PROFILE%{$reset_color%} "
+      fi
+    }
+
+    # gcloud configuration display. Prefer the per-shell env var, else the
+    # global active config file; both are cheap reads (no gcloud subprocess).
+    gcloud_prompt_info() {
+      local config="${CLOUDSDK_ACTIVE_CONFIG_NAME}"
+      if [[ -z "$config" ]]; then
+        config=$(cat "$HOME/.config/gcloud/active_config" 2>/dev/null)
+      fi
+      if [[ -n "$config" ]]; then
+        echo -n "%{$fg[yellow]%}gcp:$config%{$reset_color%} "
       fi
     }
 

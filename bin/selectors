@@ -1,5 +1,6 @@
 # selectors — fzf-driven pickers for context switching. Sourced from commonrc.
 #   ap [profile]   pick AWS profile (writes previous to ~/.aws-profile)
+#   gp [config]    pick gcloud configuration (writes previous to ~/.gcloud-profile)
 #   kk [context]   pick kubectl context
 #   kn [namespace] pick kubectl namespace in current context
 
@@ -39,6 +40,53 @@ ap() {
     fi
     export AWS_PROFILE="$profile"
     echo "✅ Switched to AWS profile: $AWS_PROFILE"
+  fi
+}
+
+# gcloud configuration selector. Sets CLOUDSDK_ACTIVE_CONFIG_NAME for this shell
+# (gcloud honors it over the global active config) and persists the previous
+# choice to ~/.gcloud-profile, mirroring `ap`.
+gp() {
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "⚠️  'fzf' is not installed. Please install it first"
+    return 1
+  fi
+
+  if ! command -v gcloud >/dev/null 2>&1; then
+    echo "⚠️  'gcloud' is not installed. Please install it first"
+    return 1
+  fi
+
+  local configs current_config config gcloud_profile_file
+  gcloud_profile_file="$HOME/.gcloud-profile"
+
+  configs=($(gcloud config configurations list --format="value(name)" 2>/dev/null))
+  if [ ${#configs[@]} -eq 0 ]; then
+    echo "No gcloud configurations found. Run 'gcloud config configurations create' first."
+    return 1
+  fi
+
+  current_config="${CLOUDSDK_ACTIVE_CONFIG_NAME:-$(cat "$HOME/.config/gcloud/active_config" 2>/dev/null)}"
+  [ -z "$current_config" ] && current_config="none"
+
+  if [ $# -eq 0 ]; then
+    config=$(for c in "${configs[@]}"; do
+      if [ "$c" = "$current_config" ]; then
+        echo "• $c"
+      else
+        echo "  $c"
+      fi
+    done | fzf --ansi --no-sort --no-mouse --prompt="Select gcloud config > " --height=~30 --reverse | sed 's/^• //;s/^  //')
+  else
+    config="$1"
+  fi
+
+  if [ -n "$config" ]; then
+    if [ -n "$CLOUDSDK_ACTIVE_CONFIG_NAME" ]; then
+      echo "$CLOUDSDK_ACTIVE_CONFIG_NAME" > "$gcloud_profile_file"
+    fi
+    export CLOUDSDK_ACTIVE_CONFIG_NAME="$config"
+    echo "✅ Switched to gcloud config: $CLOUDSDK_ACTIVE_CONFIG_NAME"
   fi
 }
 

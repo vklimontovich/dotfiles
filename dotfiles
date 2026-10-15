@@ -160,6 +160,102 @@ cmd_check() {
     else
         log "MISS" "fzf: not installed"
     fi
+
+    if command -v terminal-notifier >/dev/null 2>&1; then
+        log "OK" "terminal-notifier: $(terminal-notifier -version 2>/dev/null | head -1)"
+    else
+        log "MISS" "terminal-notifier: not installed (brew install terminal-notifier)"
+    fi
+}
+
+# Claude Code events that run bin/cc-hook.
+CC_HOOK_EVENTS='["SessionStart","UserPromptSubmit","Notification","PermissionRequest","Stop"]'
+CC_NOTIFIER_APP="$HOME/Applications/Claude Code Notifier.app"
+
+# Build "Claude Code Notifier.app": a copy of terminal-notifier.app carrying
+# Claude's icon and its own bundle id. macOS shows the posting app's icon on a
+# notification, and terminal-notifier dropped -sender, so a renamed copy is the
+# way to get the Claude icon. Rebuilt only when terminal-notifier changes, since
+# a rebuild can make macOS ask for notification permission again.
+_cc_build_notifier() {
+    local tn src icon ver have pb=/usr/libexec/PlistBuddy
+    tn=$(command -v terminal-notifier) || {
+        log "MISS" "terminal-notifier: not installed (brew install terminal-notifier); cc-hook falls back to osascript"
+        return 0
+    }
+    src=$(cd "$(dirname "$(readlink -f "$tn")")/.." && ls -d "$PWD"/terminal-notifier.app 2>/dev/null)
+    icon=/Applications/Claude.app/Contents/Resources/electron.icns
+    if [ ! -d "$src" ] || [ ! -f "$icon" ]; then
+        log "WARN" "need terminal-notifier.app and Claude.app to build $(_disp "$CC_NOTIFIER_APP"); skipping"
+        return 0
+    fi
+    ver=$($pb -c "Print :CFBundleShortVersionString" "$src/Contents/Info.plist")
+    have=$($pb -c "Print :CFBundleShortVersionString" "$CC_NOTIFIER_APP/Contents/Info.plist" 2>/dev/null)
+    if [ "$ver" = "$have" ]; then
+        log "OK" "$(_disp "$CC_NOTIFIER_APP") (terminal-notifier $ver)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$CC_NOTIFIER_APP")"
+    rm -rf "$CC_NOTIFIER_APP"
+    cp -R "$src" "$CC_NOTIFIER_APP"
+    rm -f "$CC_NOTIFIER_APP"/Contents/Resources/*.icns
+    cp "$icon" "$CC_NOTIFIER_APP/Contents/Resources/Claude.icns"
+    $pb -c "Set :CFBundleIdentifier com.klimontovich.cc-notify" \
+        -c "Set :CFBundleName Claude Code" \
+        -c "Set :CFBundleIconFile Claude" \
+        -c "Add :CFBundleDisplayName string Claude Code" \
+        "$CC_NOTIFIER_APP/Contents/Info.plist"
+    codesign --force --deep -s - "$CC_NOTIFIER_APP" 2>/dev/null
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$CC_NOTIFIER_APP"
+    # The first post through LaunchServices triggers the permission prompt.
+    open -n "$CC_NOTIFIER_APP" --args -title "Claude Code" -message "Notifications are set up"
+    log "BUILD" "$(_disp "$CC_NOTIFIER_APP") (terminal-notifier $ver) — allow notifications if macOS asks"
+}
+
+# Point every profile's settings.json at bin/cc-hook (session-named zellij tabs
+# + desktop notifications). Replaces earlier cc-hook entries and the old
+# osascript "Claude needs your attention" hook; leaves other hooks alone.
+cmd_claude_hooks() {
+    if ! command -v jq >/dev/null 2>&1; then
+        log "ERROR" "jq not installed (brew install jq)"
+        return 1
+    fi
+    _cc_build_notifier
+
+    local d f disp tmp
+    while IFS= read -r d; do
+        f="$d/settings.json"
+        disp=$(_disp "$f")
+        mkdir -p "$d"
+        [ -s "$f" ] || echo '{}' > "$f"
+        tmp="$f.$(rand_str).tmp"
+        if ! jq --argjson events "$CC_HOOK_EVENTS" '
+            def ours: (.command // "") | test("cc-hook|osascript.*Claude needs your attention");
+            .hooks //= {}
+            | .hooks |= with_entries(
+                .value |= (map(.hooks |= map(select(ours | not)))
+                           | map(select((.hooks // []) | length > 0))))
+            | .hooks |= with_entries(select(.value | length > 0))
+            | reduce $events[] as $e (.;
+                .hooks[$e] += [
+                    (if $e == "PermissionRequest" then {matcher: "*"} else {} end)
+                    + {hooks: [{type: "command",
+                                command: ("[ ! -x \"$HOME/bin/cc-hook\" ] || \"$HOME/bin/cc-hook\" " + $e),
+                                timeout: 10}]}])
+            ' "$f" > "$tmp"; then
+            rm -f "$tmp"
+            log "ERROR" "$disp: not valid JSON; skipped"
+            continue
+        fi
+        if cmp -s "$tmp" "$f"; then
+            rm -f "$tmp"
+            log "OK" "$disp (cc-hook already set)"
+        else
+            cat "$tmp" > "$f"   # write through, keeping symlinks and mode
+            rm -f "$tmp"
+            log "HOOKS" "$disp"
+        fi
+    done < <(_agents_profile_dirs claude | awk '!seen[$0]++')
 }
 
 cmd_init() {
@@ -485,7 +581,7 @@ EOF
 }
 
 # Clone/update ~/agents and reference it from every Claude profile's CLAUDE.md.
-cmd_agents() {
+cmd_agents_repo() {
     local repo="git@github.com:vklimontovich/agents.git"
     local dest="$HOME/agents"
     local disp="$dest"
@@ -496,8 +592,7 @@ cmd_agents() {
         if git -C "$dest" pull --ff-only >/dev/null 2>&1; then
             log "PULL" "$disp updated"
         else
-            log "ERROR" "git pull failed in $disp"
-            return 1
+            log "WARN" "git pull failed in $disp — syncing what is on disk"
         fi
     elif [ -e "$dest" ]; then
         log "ERROR" "$disp exists but is not a git repo"
@@ -558,15 +653,483 @@ cmd_agents() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# skills — one set of agent skills, shared by every profile.
+#
+# ~/agents/skills.yaml (tracked) says what to install. `dotfiles agents-sync`
+# downloads each entry into ~/agents/skills/<name> with `npx skills`, then
+# symlinks every skill there into the targets below. Downloaded skills
+# carry a .skills-source marker: sync drops the ones that left the yaml, and
+# leaves skills you created in ~/agents/skills by hand alone.
+# ---------------------------------------------------------------------------
+
+SKILLS_HOME="$HOME/agents"
+SKILLS_DIR="$SKILLS_HOME/skills"
+SKILLS_YAML="$SKILLS_HOME/skills.yaml"
+SKILLS_MARKER=".skills-source"
+
+# Where skills are linked, unless an entry in skills.yaml overrides it. Tokens:
+#   claude        every profile in ~/.claude-profiles.yaml, plus ~/.claude
+#   claude:<name> one Claude profile, for example claude:pp
+#   codex         every profile in ~/.codex-profiles.yaml, plus ~/.codex
+#   codex:<name>  one Codex profile
+#   gemini        ~/.gemini
+#   agents        ~/.agents (the legacy skills dir)
+#   /a/path       any other dir; skills are linked into <path>/skills
+SKILLS_DEFAULT_TARGETS="claude codex gemini agents"
+
+# Shorten a path for logs: /Users/me/x -> ~/x
+_disp() {
+    local p="$1"
+    case "$p" in "$HOME"/*) p="~${p#$HOME}";; esac
+    printf '%s\n' "$p"
+}
+
+# All config dirs of one agent CLI: every dir in ~/.<cli>-profiles.yaml, plus
+# the native ~/.<cli> home. An entry with "dir: default" means the native home.
+_agents_profile_dirs() {
+    local cli="$1" d
+    local config="$HOME/.$cli-profiles.yaml"
+    local native="$HOME/.$cli"
+    if [ -f "$config" ]; then
+        while IFS= read -r d; do
+            case "$d" in ""|null) continue ;; default) d="$native" ;; esac
+            d="${d/#\~/$HOME}"
+            printf '%s\n' "${d%/}"
+        done < <(yq -r '.[].dir' "$config" 2>/dev/null)
+    fi
+    if [ -d "$native" ]; then printf '%s\n' "$native"; fi
+    return 0
+}
+
+# The config dir of one named profile of an agent CLI.
+_agents_profile_dir() {
+    local cli="$1" name="$2" dir
+    local config="$HOME/.$cli-profiles.yaml"
+    if [ "$name" = default ]; then printf '%s\n' "$HOME/.$cli"; return 0; fi
+    dir=$(yq -r ".[] | select(.name == \"$name\") | .dir" "$config" 2>/dev/null)
+    case "$dir" in ""|null) return 1 ;; default) dir="$HOME/.$cli" ;; esac
+    dir="${dir/#\~/$HOME}"
+    printf '%s\n' "${dir%/}"
+}
+
+# Turn target tokens (claude, codex:pp, gemini, agents, /a/path) into dirs.
+_agents_resolve_targets() {
+    local t d
+    for t in "$@"; do
+        case "$t" in
+            claude|codex) _agents_profile_dirs "$t" ;;
+            claude:*|codex:*)
+                if d=$(_agents_profile_dir "${t%%:*}" "${t#*:}"); then
+                    printf '%s\n' "$d"
+                else
+                    log "WARN" "unknown profile in skills.yaml targets: $t"
+                fi ;;
+            gemini) printf '%s\n' "$HOME/.gemini" ;;
+            agents) printf '%s\n' "$HOME/.agents" ;;
+            /*|"~"/*) d="${t/#\~/$HOME}"; printf '%s\n' "${d%/}" ;;
+            *) log "WARN" "unknown target in skills.yaml: $t" ;;
+        esac
+    done | awk 'NF && !seen[$0]++'
+}
+
+# One line per skills.yaml entry: source <TAB> select-csv <TAB> targets-csv.
+_skills_yaml_entries() {
+    yq -r '
+      (.skills // []) | .[] |
+      [ .source,
+        ( ( .select // .skill // "*" ) | [.] | flatten | join(",") ),
+        ( ( .targets // [] ) | [.] | flatten | join(",") )
+      ] | @tsv' "$SKILLS_YAML" 2>/dev/null
+}
+
+# The targets-csv that skills.yaml gives to a source, empty if it has none.
+_skills_targets_for_source() {
+    local want="$1" source select targets
+    while IFS=$'\t' read -r source select targets; do
+        if [ "$source" = "$want" ]; then printf '%s\n' "$targets"; return 0; fi
+    done < <(_skills_yaml_entries)
+    return 0
+}
+
+# Where a symlink points, as an absolute path.
+_agents_link_target() {
+    local link="$1" t
+    t="$(readlink "$link")"
+    case "$t" in /*) ;; *) t="$(dirname "$link")/$t" ;; esac
+    printf '%s\n' "$t"
+}
+
+cmd_skills_sync() {
+    local no_fetch=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-fetch) no_fetch=1; shift ;;
+            *) log "ERROR" "unknown option: $1"; return 1 ;;
+        esac
+    done
+
+    if ! command -v yq >/dev/null 2>&1; then
+        log "ERROR" "skills sync needs yq — brew install yq"
+        return 1
+    fi
+    if [ ! -d "$SKILLS_HOME" ]; then
+        log "ERROR" "$(_disp "$SKILLS_HOME") is missing — run: dotfiles agents"
+        return 1
+    fi
+    if [ ! -f "$SKILLS_YAML" ]; then
+        log "ERROR" "no $(_disp "$SKILLS_YAML")"
+        return 1
+    fi
+    if [ "$no_fetch" -eq 0 ] && ! command -v npx >/dev/null 2>&1; then
+        log "ERROR" "skills sync needs npx (node) — brew install node, or pass --no-fetch"
+        return 1
+    fi
+
+    mkdir -p "$SKILLS_DIR"
+
+    local stage
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-skills.XXXXXX")"
+    : > "$stage/managed"   # name <TAB> source <TAB> staged-path <TAB> targets-csv
+    : > "$stage/all"       # name <TAB> targets-csv  (managed + hand-made)
+    : > "$stage/links"     # target-dir <TAB> name
+    : > "$stage/targets"   # every target dir sync touches
+
+    local default_targets="$SKILLS_DEFAULT_TARGETS"
+
+    # Step 1: download every entry into its own staging dir. Project scope with
+    # --copy puts the files in <cwd>/.claude/skills, which is ours to move.
+    local source select targets i=0 work name d
+    if [ "$no_fetch" -eq 0 ]; then
+        while IFS=$'\t' read -r source select targets; do
+            [ -z "$source" ] && continue
+            i=$((i + 1))
+            work="$stage/dl-$i"
+            mkdir -p "$work"
+            local -a sel_args=()
+            while IFS= read -r name; do
+                [ -n "$name" ] && sel_args+=("$name")
+            done < <(printf '%s\n' "$select" | tr ',' '\n')
+            log "FETCH" "$source [${select}]"
+            if ! ( cd "$work" && env -u CLAUDE_CONFIG_DIR -u CODEX_HOME \
+                     npx -y skills@latest add "$source" --skill "${sel_args[@]}" \
+                       --agent claude-code --copy -y ) >"$work/out.log" 2>&1 </dev/null; then
+                log "ERROR" "npx skills add $source failed"
+                sed 's/^/          /' "$work/out.log" >&2
+                rm -rf "$stage"
+                return 1
+            fi
+            for d in "$work"/.claude/skills/*/; do
+                [ -d "$d" ] || continue
+                name="$(basename "$d")"
+                printf '%s\t%s\t%s\t%s\n' "$name" "$source" "${d%/}" "$targets" >> "$stage/managed"
+            done
+        done < <(_skills_yaml_entries)
+    else
+        # --no-fetch: keep what is on disk, and take its targets from the yaml.
+        for d in "$SKILLS_DIR"/*/; do
+            [ -d "$d" ] || continue
+            [ -f "${d}${SKILLS_MARKER}" ] || continue
+            name="$(basename "$d")"
+            source="$(cat "${d}${SKILLS_MARKER}")"
+            printf '%s\t%s\t%s\t%s\n' "$name" "$source" "" \
+                "$(_skills_targets_for_source "$source")" >> "$stage/managed"
+        done
+    fi
+
+    # Step 2: move the downloads into ~/agents/skills.
+    local staged dest
+    if [ "$no_fetch" -eq 0 ]; then
+        while IFS=$'\t' read -r name source staged targets; do
+            dest="$SKILLS_DIR/$name"
+            if [ -e "$dest" ] && [ ! -f "$dest/$SKILLS_MARKER" ]; then
+                log "WARN" "$(_disp "$dest") is hand-made — leaving it, $source not installed"
+                continue
+            fi
+            rm -rf "$dest"
+            cp -R "$staged" "$dest"
+            printf '%s\n' "$source" > "$dest/$SKILLS_MARKER"
+            log "INSTALL" "$(_disp "$dest") ($source)"
+        done < "$stage/managed"
+
+        # Step 3: drop downloaded skills that skills.yaml no longer lists.
+        for d in "$SKILLS_DIR"/*/; do
+            [ -d "$d" ] || continue
+            [ -f "${d}${SKILLS_MARKER}" ] || continue
+            name="$(basename "$d")"
+            if ! cut -f1 "$stage/managed" | grep -qxF "$name"; then
+                log "REMOVE" "$(_disp "${d%/}") (gone from skills.yaml)"
+                rm -rf "${d%/}"
+            fi
+        done
+    fi
+
+    # Step 4: the full skill list — downloaded ones keep their per-skill
+    # targets, hand-made ones get the default targets.
+    for d in "$SKILLS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        if [ -f "${d}${SKILLS_MARKER}" ]; then
+            targets="$(awk -F'\t' -v n="$name" '$1 == n {print $4; exit}' "$stage/managed")"
+        else
+            targets=""
+        fi
+        printf '%s\t%s\n' "$name" "$targets" >> "$stage/all"
+    done
+
+    # Step 5: gitignore the downloaded skills, keep the hand-made ones tracked.
+    {
+        printf '# Written by `dotfiles skills sync`.\n'
+        printf '# Skills from skills.yaml stay untracked — sync fetches them again.\n'
+        printf '# Skills you add by hand are not listed here, so git keeps them.\n'
+        while IFS=$'\t' read -r name source staged targets; do
+            printf '/%s/\n' "$name"
+        done < "$stage/managed" | sort -u
+    } > "$SKILLS_DIR/.gitignore"
+
+    # Step 6: link every skill into its targets.
+    local t
+    while IFS=$'\t' read -r name targets; do
+        local -a tokens=()
+        if [ -n "$targets" ]; then
+            while IFS= read -r t; do
+                [ -n "$t" ] && tokens+=("$t")
+            done < <(printf '%s\n' "$targets" | tr ',' '\n')
+        else
+            for t in $default_targets; do tokens+=("$t"); done
+        fi
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            do_link "$SKILLS_DIR/$name" "$t/skills/$name"
+            printf '%s\t%s\n' "$t" "$name" >> "$stage/links"
+            printf '%s\n' "$t" >> "$stage/targets"
+        done < <(_agents_resolve_targets "${tokens[@]}")
+    done < "$stage/all"
+
+    # Also sweep targets that no longer host any skill.
+    _agents_resolve_targets $default_targets >> "$stage/targets"
+
+    # Step 7: remove links into ~/agents/skills that sync did not just make.
+    local sd f lt
+    while IFS= read -r t; do
+        sd="$t/skills"
+        [ -d "$sd" ] || continue
+        for f in "$sd"/*; do
+            [ -L "$f" ] || continue
+            lt="$(_agents_link_target "$f")"
+            case "$lt" in
+                "$SKILLS_DIR"/*)
+                    name="$(basename "$f")"
+                    if ! grep -qxF "$t"$'\t'"$name" "$stage/links"; then
+                        log "UNLINK" "$(_disp "$f") (no longer wanted here)"
+                        unlink "$f"
+                    fi ;;
+            esac
+        done
+    done < <(sort -u "$stage/targets")
+
+    log "OK" "$(wc -l < "$stage/all" | tr -d ' ') skills in $(_disp "$SKILLS_DIR"), $(sort -u "$stage/targets" | wc -l | tr -d ' ') targets"
+    rm -rf "$stage"
+}
+
+cmd_skills_list() {
+    if [ ! -d "$SKILLS_DIR" ]; then
+        log "MISS" "$(_disp "$SKILLS_DIR") does not exist — run: dotfiles skills sync"
+        return 0
+    fi
+    local d name source links
+    printf 'SKILL\tSOURCE\tLINKS\n'
+    for d in "$SKILLS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        if [ -f "${d}${SKILLS_MARKER}" ]; then
+            source="$(cat "${d}${SKILLS_MARKER}")"
+        else
+            source="(hand-made)"
+        fi
+        links=0
+        while IFS= read -r t; do
+            if [ -L "$t/skills/$name" ]; then links=$((links + 1)); fi
+        done < <(_agents_resolve_targets $SKILLS_DEFAULT_TARGETS)
+        printf '%s\t%s\t%s\n' "$name" "$source" "$links"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# commands — one set of slash commands, shared by every profile.
+#
+# ~/agents/commands/<name>.md is the source of truth. Every file there is
+# symlinked into each Claude profile as commands/<name>.md, so `/name` works
+# in all of them. All commands are hand-written and tracked in git — there is
+# nothing to download.
+#
+# Claude only, by design: the command format is Claude Code's (frontmatter
+# plus !`shell` blocks). Codex reads plain prompts from prompts/ and Gemini
+# wants TOML, so add "codex" below only when a command is portable.
+# ---------------------------------------------------------------------------
+
+COMMANDS_DIR="$SKILLS_HOME/commands"
+COMMANDS_DEFAULT_TARGETS="claude"
+
+# Every command file in ~/agents/commands, one name per line. README.md and
+# names that start with _ are docs, not commands.
+_commands_files() {
+    local f name
+    for f in "$COMMANDS_DIR"/*.md; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f")"
+        case "$name" in README.md|readme.md|_*) continue ;; esac
+        printf '%s\n' "$name"
+    done
+}
+
+# The subdir that holds slash commands in a target dir: prompts/ for Codex,
+# commands/ for everything else.
+_commands_subdir() {
+    local dir="$1" d
+    while IFS= read -r d; do
+        if [ "$d" = "$dir" ]; then printf 'prompts\n'; return 0; fi
+    done < <(_agents_profile_dirs codex)
+    printf 'commands\n'
+}
+
+cmd_commands_sync() {
+    if [ ! -d "$COMMANDS_DIR" ]; then
+        log "SKIP" "no $(_disp "$COMMANDS_DIR")"
+        return 0
+    fi
+
+    local stage
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-commands.XXXXXX")"
+    : > "$stage/links"     # command-dir <TAB> file name
+    : > "$stage/targets"   # every profile dir sync touches
+    _agents_resolve_targets $COMMANDS_DEFAULT_TARGETS > "$stage/targets"
+
+    # Step 1: link every command into every target.
+    local name t sub n=0
+    while IFS= read -r name; do
+        n=$((n + 1))
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            sub="$(_commands_subdir "$t")"
+            do_link "$COMMANDS_DIR/$name" "$t/$sub/$name"
+            printf '%s\t%s\n' "$t/$sub" "$name" >> "$stage/links"
+        done < "$stage/targets"
+    done < <(_commands_files)
+
+    # Step 2: remove links into ~/agents/commands that sync did not just make.
+    local cd_ lt
+    while IFS= read -r t; do
+        [ -z "$t" ] && continue
+        cd_="$t/$(_commands_subdir "$t")"
+        [ -d "$cd_" ] || continue
+        for f in "$cd_"/*; do
+            [ -L "$f" ] || continue
+            lt="$(_agents_link_target "$f")"
+            case "$lt" in
+                "$COMMANDS_DIR"/*)
+                    name="$(basename "$f")"
+                    if ! grep -qxF "$cd_"$'\t'"$name" "$stage/links"; then
+                        log "UNLINK" "$(_disp "$f") (no longer wanted here)"
+                        unlink "$f"
+                    fi ;;
+            esac
+        done
+    done < "$stage/targets"
+
+    log "OK" "$n commands in $(_disp "$COMMANDS_DIR"), $(wc -l < "$stage/targets" | tr -d ' ') targets"
+    rm -rf "$stage"
+}
+
+cmd_commands_list() {
+    if [ ! -d "$COMMANDS_DIR" ]; then
+        log "MISS" "$(_disp "$COMMANDS_DIR") does not exist"
+        return 0
+    fi
+    local name links t
+    printf 'COMMAND\tLINKS\n'
+    while IFS= read -r name; do
+        links=0
+        while IFS= read -r t; do
+            if [ -L "$t/$(_commands_subdir "$t")/$name" ]; then links=$((links + 1)); fi
+        done < <(_agents_resolve_targets $COMMANDS_DEFAULT_TARGETS)
+        printf '/%s\t%s\n' "${name%.md}" "$links"
+    done < <(_commands_files)
+}
+
+# ---------------------------------------------------------------------------
+# agents-sync — the one command that syncs everything the agent CLIs share.
+# ---------------------------------------------------------------------------
+
+cmd_agents_sync() {
+    local list=0
+    local -a pass=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --list) list=1; shift ;;
+            --no-fetch) pass+=("$1"); shift ;;
+            -h|--help) cat <<EOF
+Usage: dotfiles agents-sync [--no-fetch] [--list]
+
+  Updates ~/agents, points every profile's CLAUDE.md at ~/agents/AGENTS.md,
+  installs the skills listed in ~/agents/skills.yaml, and links the skills and
+  the slash commands in ~/agents/commands into every profile. Idempotent.
+
+  --no-fetch   relink only, download nothing
+  --list       show what is installed, change nothing
+EOF
+                return 0 ;;
+            *) log "ERROR" "unknown option: $1"; return 1 ;;
+        esac
+    done
+
+    if [ "$list" -eq 1 ]; then
+        cmd_skills_list | column -t -s $'\t'
+        echo
+        cmd_commands_list | column -t -s $'\t'
+        return 0
+    fi
+
+    cmd_agents_repo
+    cmd_skills_sync "${pass[@]}"
+    cmd_commands_sync
+}
+
+# Kept so old muscle memory still works: everything is one sync now.
+cmd_skills() {
+    local sub="${1:-}"
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+        sync)    log "WARN" "dotfiles skills sync is now: dotfiles agents-sync"
+                 cmd_agents_sync "$@" ;;
+        list|ls) log "WARN" "dotfiles skills list is now: dotfiles agents-sync --list"
+                 cmd_agents_sync --list ;;
+        *)       log "ERROR" "dotfiles skills is gone — use: dotfiles agents-sync"
+                 return 1 ;;
+    esac
+}
+
 usage() {
     cat <<EOF
 Usage: dotfiles <command>
 
 Commands:
   init                      Symlink dotfiles into \$HOME (idempotent)
-  check                     Print status: shell, zellij, oh-my-zsh, fzf
-  agents                    Clone/update ~/agents and reference it from each
-                            profile's CLAUDE.md (idempotent)
+  check                     Print status: shell, zellij, oh-my-zsh, fzf,
+                            terminal-notifier
+  agents-sync [opts]        One sync for everything the agent CLIs share.
+                            Updates ~/agents, points every profile's CLAUDE.md
+                            at ~/agents/AGENTS.md, installs the skills listed
+                            in ~/agents/skills.yaml, and links those skills and
+                            the slash commands in ~/agents/commands into
+                            every profile that takes them. Idempotent.
+                            Options:
+                              --no-fetch          relink only, download nothing
+                              --list              show what is installed,
+                                                  change nothing
+  claude-hooks              Wire bin/cc-hook into every Claude profile:
+                            zellij tabs named "🧠 · <session>" and desktop
+                            notifications with the Claude icon (idempotent)
   deploy <server> [opts]    Rsync dotfiles to a remote and run init there.
                             <server> is an ssh target: a host alias or
                             user@host (e.g. jitsu005@jitsu005).
@@ -594,7 +1157,11 @@ case "${1:-}" in
     init)              shift; cmd_init "$@" ;;
     check)             shift; cmd_check "$@" ;;
     deploy)            shift; cmd_deploy "$@" ;;
-    agents)            shift; cmd_agents "$@" ;;
+    agents-sync)       shift; cmd_agents_sync "$@" ;;
+    claude-hooks)      shift; cmd_claude_hooks "$@" ;;
+    agents)            shift; log "WARN" "dotfiles agents is now: dotfiles agents-sync"
+                       cmd_agents_sync "$@" ;;
+    skills)            shift; cmd_skills "$@" ;;
     -h|--help|help|"") usage ;;
     *) log "ERROR" "unknown command: $1"; usage; exit 1 ;;
 esac

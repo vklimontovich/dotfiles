@@ -52,7 +52,9 @@ ERRORS
     Failures are reported in the server's own words, never as a stack trace: the
     parameters an authorization server sent back when it refused, and the status,
     headers and full body of the last failing HTTP response. --debug adds the
-    tracebacks and the SDK's own logging when you need to see the machinery.
+    tracebacks and the SDK's own logging when you need to see the machinery, and
+    prints the raw Authorization credential of every request as it goes out — the
+    live access token, or whatever -H supplied (PRINTS LIVE SECRETS).
 
 OUTPUT
     One JSON document on stdout; progress and errors on stderr, so `| jq` just works.
@@ -118,6 +120,7 @@ from typing import Any
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.client.auth.oauth2 import OAuthContext
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -136,6 +139,12 @@ CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "mc
 # Filled in by the response hook below, so a failure can be explained with the
 # server's own words instead of a stack trace. Last error response wins.
 LAST_HTTP_ERROR: dict[str, Any] = {}
+
+# Set from --debug. Turns on the request hook that echoes the credential we send.
+DEBUG = False
+
+# Credentials already echoed, so a run with many requests prints each one once.
+SEEN_CREDENTIALS: set[str] = set()
 
 
 class AuthorizationDenied(RuntimeError):
@@ -172,10 +181,28 @@ async def record_http_error(response: Any) -> None:
     })
 
 
+async def echo_credential(request: Any) -> None:
+    """--debug: print the credential we are about to send, verbatim.
+
+    Hooked on the request rather than read out of the cache, so what gets printed is
+    exactly what goes on the wire — after a refresh, and including a token supplied
+    by hand with -H. Each distinct value is printed once per run.
+    """
+    header = request.headers.get("authorization")
+    if not header or header in SEEN_CREDENTIALS:
+        return
+    SEEN_CREDENTIALS.add(header)
+    scheme, _, credential = header.partition(" ")
+    step(f"credential sent to {request.url} ({scheme or 'no scheme'}, raw):")
+    print(credential or header, file=sys.stderr, flush=True)
+
+
 def watched_http_client(headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
     """A normal MCP http client, plus the hook that captures error bodies."""
     client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
     client.event_hooks["response"].append(record_http_error)
+    if DEBUG:
+        client.event_hooks["request"].append(echo_credential)
     return client
 
 
@@ -376,7 +403,38 @@ def free_port(preferred: int) -> int:
     raise RuntimeError("could not bind a loopback port for the OAuth redirect")
 
 
+_SINGLE_CLIENT_AUTH_PATCHED = False
+
+
+def patch_single_client_authentication() -> None:
+    """Authenticate the token request one way, not two.
+
+    The SDK always carries `client_id` in the token request body and, when the
+    registration came back as `client_secret_basic`, sends the HTTP Basic header
+    as well. RFC 6749 Section 2.3 says a client MUST NOT use more than one
+    authentication method per request; most servers ignore the redundant
+    parameter, but strict ones (Linear) refuse the whole exchange with
+    "Client must not use multiple authentication methods". Drop the body copy
+    whenever the Basic header is the credential.
+    """
+    global _SINGLE_CLIENT_AUTH_PATCHED
+    if _SINGLE_CLIENT_AUTH_PATCHED:
+        return
+    _SINGLE_CLIENT_AUTH_PATCHED = True
+    original = OAuthContext.prepare_token_auth
+
+    def prepare_token_auth(self: OAuthContext, data: dict[str, str],
+                           headers: dict[str, str] | None = None) -> tuple[dict[str, str], dict[str, str]]:
+        data, headers = original(self, data, headers)
+        if headers.get("Authorization", "").startswith("Basic "):
+            data = {k: v for k, v in data.items() if k != "client_id"}
+        return data, headers
+
+    OAuthContext.prepare_token_auth = prepare_token_auth
+
+
 def build_auth(url: str, args: argparse.Namespace, server: CallbackServer) -> OAuthClientProvider:
+    patch_single_client_authentication()
     redirect_uri = f"http://localhost:{server.port}/callback"
 
     async def redirect_handler(authorization_url: str) -> None:
@@ -1323,7 +1381,8 @@ def main() -> int:
                    metavar="'Name: value'", help="extra HTTP header; repeatable")
     p.add_argument("-c", "--compact", action="store_true", help="single-line JSON")
     p.add_argument("--debug", action="store_true",
-                   help="show tracebacks and the SDK's own logging instead of a plain error")
+                   help="show tracebacks and the SDK's own logging instead of a plain error, and "
+                        "print the raw credential sent to the server (PRINTS LIVE SECRETS)")
     p.add_argument("--ui", action="store_true",
                    help="browse the result in a terminal UI instead of printing JSON: "
                         "filterable list of every tool, prompt and resource, with schemas expanded")
@@ -1351,6 +1410,9 @@ def main() -> int:
         p.print_help()
         return 0
     args = p.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
 
     if not args.debug:
         # The SDK logs full tracebacks of its own; we render the failure ourselves.

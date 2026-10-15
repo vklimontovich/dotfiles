@@ -156,3 +156,16 @@ fi
 # Machine-local overrides (untracked). Deliberate per-machine config goes here;
 # installer PATH lines usually land in the ~/.zshrc stub instead.
 [ -f ~/.zshrc.local ] && source ~/.zshrc.local
+
+# Entire CLI shell completion
+command -v entire >/dev/null 2>&1 && source <(entire completion zsh)
+
+# opencode
+[ -d "$HOME/.opencode/bin" ] && export PATH="$HOME/.opencode/bin:$PATH"
+
+# The next line updates PATH for CLI.
+if [ -f "$HOME/yandex-cloud/path.bash.inc" ]; then source "$HOME/yandex-cloud/path.bash.inc"; fi
+
+# The next line enables shell command completion for yc.
+if [ -f "$HOME/yandex-cloud/completion.zsh.inc" ]; then source "$HOME/yandex-cloud/completion.zsh.inc"; fi
+

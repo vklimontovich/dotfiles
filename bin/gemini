@@ -1,0 +1,239 @@
+#!/bin/bash
+
+# gemini — wrapper that picks a config profile before launching the CLI.
+# Profiles live in ~/.gemini-profiles.yaml as a list of { name, dir }, each an
+# isolated GEMINI_CONFIG_DIR. Choose one with --profile NAME / -P NAME, the
+# GEMINI_PROFILE env var (e.g. GEMINI_PROFILE=pp gemini), or the interactive
+# picker; an explicit flag wins. gemini's own -p/--print is left untouched.
+# Needs yq + fzf + jq; if a dep is missing it prints a banner and runs gemini
+# as-is. The picker shows each profile's plan, billing mode, account, and dir.
+# An explicitly named profile that doesn't exist yet prompts to create it.
+# Adds --approval-mode yolo when launching a session (no args, flags
+# like -r, or a prompt) — but not for subcommands, which don't accept it.
+
+# _gemini_dep_banner — warn that a profile-picker dependency is missing.
+_gemini_dep_banner() {
+  local dep="$1" hint="$2"
+  echo "⚠️  Gemini profiles need '$dep', which isn't installed — running the default profile." >&2
+  echo "    Install it: $hint" >&2
+}
+
+# Resolve a gemini profile name to its config dir. "default" maps to ~/.gemini;
+# anything else is looked up in ~/.gemini-profiles.yaml. An entry may use
+# "dir: default" to alias the default profile under another name. Prints
+# nothing and returns 1 if the name is unknown.
+_gemini_profile_dir() {
+  local config="$HOME/.gemini-profiles.yaml" dir
+  if [ "$1" = "default" ]; then
+    echo "$HOME/.gemini"
+    return 0
+  fi
+  dir=$(yq -r ".[] | select(.name == "$1") | .dir" "$config" 2>/dev/null)
+  [ -z "$dir" ] || [ "$dir" = "null" ] && return 1
+  if [ "$dir" = "default" ]; then
+    echo "$HOME/.gemini"
+    return 0
+  fi
+  dir="${dir/#\~/$HOME}"
+  echo "${dir%/}"
+}
+
+# Resolve a profile's optional home_dir — the directory gemini should launch
+# from. Looked up in ~/.gemini-profiles.yaml; the default profile has none.
+# Prints the expanded path (no trailing slash), or nothing if unset.
+_gemini_profile_home() {
+  local config="$HOME/.gemini-profiles.yaml" home
+  [ "$1" = "default" ] && return 0
+  home=$(yq -r ".[] | select(.name == "$1") | .home_dir // """ "$config" 2>/dev/null)
+  [ -z "$home" ] || [ "$home" = "null" ] && return 0
+  home="${home/#\~/$HOME}"
+  echo "${home%/}"
+}
+
+# _gemini_cd_home — cd into a profile's home_dir unless we're already inside it.
+# No-op when the profile has no home_dir. Warns and stays put if the dir is
+# missing rather than failing the launch.
+_gemini_cd_home() {
+  local home; home=$(_gemini_profile_home "$1")
+  [ -z "$home" ] && return 0
+  case "$PWD/" in
+    "$home"/*) return 0 ;;  # already inside home_dir (or at it)
+  esac
+  if [ ! -d "$home" ]; then
+    echo "⚠️  Profile home_dir does not exist: $home — staying in $PWD" >&2
+    return 0
+  fi
+  cd "$home" || return 1
+  echo "📂 cd $home" >&2
+}
+
+# _gemini_create_profile — offer to register an unknown profile in
+# ~/.gemini-profiles.yaml, mapping it to ~/.gemini-profiles/<name>/. Asks for
+# confirmation on a TTY; refuses non-interactively so a typo'd name in a script
+# still fails loudly instead of silently spawning a logged-out profile.
+_gemini_create_profile() {
+  local name="$1" config="$HOME/.gemini-profiles.yaml" dir reply
+  dir="$HOME/.gemini-profiles/$name"
+  case "$name" in
+    ''|*[!A-Za-z0-9._-]*|.*|-*)
+      echo "⚠️  Invalid Gemini profile name: $name" >&2
+      return 1 ;;
+  esac
+  if [ ! -t 2 ] || [ ! -r /dev/tty ]; then
+    echo "⚠️  Unknown Gemini profile: $name" >&2
+    echo "    Add it to $config to create it." >&2
+    return 1
+  fi
+  printf '⚠️  Unknown Gemini profile: %s
+    Create it at ~/.gemini-profiles/%s/? [y/N] ' "$name" "$name" >&2
+  read -r reply < /dev/tty
+  case "$reply" in
+    y|Y|yes|Yes|YES) ;;
+    *) echo "Aborted." >&2; return 1 ;;
+  esac
+  mkdir -p "$dir" || return 1
+  # Keep the YAML list well-formed if the file doesn't end in a newline.
+  [ -s "$config" ] && [ "$(tail -c1 "$config" | wc -l)" -eq 0 ] && printf '
+' >> "$config"
+  printf -- '- name: %s
+  dir: ~/.gemini-profiles/%s/
+' "$name" "$name" >> "$config"
+  echo "✅ Created profile '$name' → ~/.gemini-profiles/$name/ — log in when Gemini starts." >&2
+}
+
+# Print a tab-separated table of gemini profiles (header + one row per profile).
+# Plan, billing, and account are read straight from each profile's
+# <dir>/.gemini.json oauthAccount — no need to launch gemini. A profile whose
+# dir is ~/.gemini is native, so its config is ~/.gemini.json instead.
+# Billing is "metered" when the account bills per token, else "flat".
+_gemini_profiles_table() {
+  local config="$HOME/.gemini-profiles.yaml"
+  local -a names
+  local n d disp j email plan billing
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  printf 'PROFILE	PLAN	BILLING	ACCOUNT	DIR
+'
+  for n in "${names[@]}"; do
+    d=$(_gemini_profile_dir "$n") || continue
+    j="$d/.gemini.json"; [ "$d" = "$HOME/.gemini" ] && j="$HOME/.gemini.json"
+    disp="$d"; case "$disp" in "$HOME"/*) disp="~${disp#$HOME}";; esac
+    email="-"; plan="-"; billing="-"
+    if [ -f "$j" ]; then
+      email=$(jq -r '.oauthAccount.emailAddress // "-"' "$j" 2>/dev/null)
+      plan=$(jq -r '.oauthAccount.organizationRateLimitTier // "-"
+                    | sub("^default_";"") | sub("^gemini_";"") | sub("^raven_";"")
+                    | gsub("_";" ")' "$j" 2>/dev/null)
+      billing=$(jq -r '.oauthAccount
+                    | if ((.seatTier // "")|test("usage")) or ((.billingType // "")|test("usage"))
+                      then "metered" else "flat" end' "$j" 2>/dev/null)
+      [ -z "$plan" ] && plan="-"
+    fi
+    printf '%s	%s	%s	%s	%s
+' "$n" "$plan" "$billing" "$email" "$disp"
+  done
+}
+
+# gemini-profiles — print the profile table without launching anything.
+gemini-profiles() {
+  if ! command -v yq >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "gemini-profiles needs yq and jq — run: brew install yq jq" >&2
+    return 1
+  fi
+  [ -f "$HOME/.gemini-profiles.yaml" ] || { echo "No ~/.gemini-profiles.yaml" >&2; return 1; }
+  _gemini_profiles_table | column -t -s $'	'
+}
+
+gemini() {
+  local config="$HOME/.gemini-profiles.yaml"
+  local -a names args
+  local profile dir arg flag_profile=""
+
+  # Pull an explicit profile out of the args: --profile NAME | --profile=NAME
+  # | -P NAME | -P=NAME. Everything else is forwarded to gemini untouched, so
+  # gemini's own -p/--print keeps working. An explicit flag beats GEMINI_PROFILE
+  # and the picker.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile=*|-P=*) flag_profile="${1#*=}"; shift ;;
+      --profile|-P)
+        if [ $# -ge 2 ]; then flag_profile="$2"; shift 2; else shift; fi ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]}"
+
+  # Skip permission prompts for sessions; subcommands reject the flag.
+  case "$1" in
+    agents|auth|auto-mode|config|doctor|gateway|install|mcp|migrate-installer|plugin|plugins|project|setup-token|ultrareview|update|upgrade) ;;
+    *)
+      set -- "$@" --approval-mode yolo
+      ;;
+  esac
+
+  # No profiles configured: run gemini untouched, no noise.
+  if [ ! -f "$config" ]; then
+    command gemini "$@"
+    return
+  fi
+
+  # yq reads the profiles; without it the picker can't work.
+  if ! command -v yq >/dev/null 2>&1; then
+    _gemini_dep_banner yq "brew install yq"
+    command gemini "$@"
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    _gemini_dep_banner jq "brew install jq"
+    command gemini "$@"
+    return
+  fi
+
+  names=($(yq -r '.[].name' "$config" 2>/dev/null))
+  if [ ${#names[@]} -eq 0 ]; then
+    command gemini "$@"
+    return
+  fi
+
+  if [ -n "$flag_profile" ]; then
+    profile="$flag_profile"
+  elif [ -n "$GEMINI_PROFILE" ]; then
+    profile="$GEMINI_PROFILE"
+  elif [ ${#names[@]} -eq 1 ]; then
+    profile="${names[@]:0:1}"
+  elif ! command -v fzf >/dev/null 2>&1; then
+    _gemini_dep_banner fzf "brew install fzf"
+    command gemini "$@"
+    return
+  else
+    profile=$(_gemini_profiles_table | column -t -s $'	' |
+      fzf --ansi --no-sort --no-mouse --header-lines=1 
+          --prompt="Select Gemini profile > " --height=~30 --reverse |
+      awk '{print $1}')
+    [ -z "$profile" ] && return 1
+  fi
+
+  dir=$(_gemini_profile_dir "$profile")
+  if [ -z "$dir" ]; then
+    _gemini_create_profile "$profile" || return 1
+    dir=$(_gemini_profile_dir "$profile") || return 1
+  fi
+
+  # cd into the profile's home_dir (if any) unless we're already inside it.
+  _gemini_cd_home "$profile" || return 1
+
+  # ~/.gemini is gemini's native home: leave GEMINI_CONFIG_DIR unset so it
+  # reads ~/.gemini.json (pointing GEMINI_CONFIG_DIR at ~/.gemini would read
+  # ~/.gemini/.gemini.json instead, a different and empty config).
+  if [ "$dir" = "$HOME/.gemini" ]; then
+    echo "🤖 Gemini profile: $profile" >&2
+    command gemini "$@"
+    return
+  fi
+
+  echo "🤖 Gemini profile: $profile ($dir)" >&2
+  GEMINI_CONFIG_DIR="$dir" command gemini "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  gemini "$@"
+fi

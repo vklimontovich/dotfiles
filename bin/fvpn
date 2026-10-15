@@ -1,0 +1,647 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""fvpn - FortiGate VPN wrapper around openfortivpn with auto-reconnect.
+
+    fvpn up       connect and keep the tunnel up
+    fvpn down     disconnect
+    fvpn status   show connection state
+    fvpn log      tail the log
+    fvpn setup    (re)write the gateway config
+
+The gateway drops the session about every hour. `fvpn up` starts a root
+supervisor that respawns openfortivpn on every drop, so only the FortiToken
+push needs a tap on the phone.
+
+The password is never stored on disk in plaintext. It is read from 1Password
+at `up` time and handed to the supervisor over a pipe.
+"""
+
+import argparse
+import errno
+import json
+import os
+import pty
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+CONFIG_DIR = "/etc/openfortivpn"
+CONFIG_FILE = f"{CONFIG_DIR}/config"
+OP_REF_FILE = f"{CONFIG_DIR}/.1p"
+RESOLVER_DIR = "/etc/resolver"
+RESOLVER_MANIFEST = f"{CONFIG_DIR}/.resolvers"
+
+RUN_DIR = "/var/run/fvpn"
+SESSION_CONF = f"{RUN_DIR}/session.conf"
+STATE_FILE = f"{RUN_DIR}/state.json"
+LOG_FILE = "/var/log/fvpn.log"
+
+LOG_MAX_BYTES = 5 * 1024 * 1024
+UP_TIMEOUT = 120  # seconds to wait for the first tunnel, incl. the 2FA tap
+STABLE_SESSION = 120  # a session this long counts as healthy, not a failure
+MAX_FAILURE_STREAK = 6
+
+TTY = sys.stdout.isatty()
+
+
+def c(code, text):
+    return f"\033[{code}m{text}\033[0m" if TTY else text
+
+
+def green(t):
+    return c("32", t)
+
+
+def red(t):
+    return c("31", t)
+
+
+def yellow(t):
+    return c("33", t)
+
+
+def dim(t):
+    return c("2", t)
+
+
+def bold(t):
+    return c("1", t)
+
+
+def die(msg, code=1):
+    print(red(f"✖ {msg}"), file=sys.stderr)
+    sys.exit(code)
+
+
+def note(msg):
+    print(yellow(f"⚠ {msg}"))
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+# ---------------------------------------------------------------- state
+
+
+def read_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_state(state):
+    """Atomic, world-readable: `fvpn status` runs unprivileged."""
+    tmp = f"{STATE_FILE}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATE_FILE)
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def openfortivpn_pids():
+    r = run(["pgrep", "-x", "openfortivpn"])
+    return [int(p) for p in r.stdout.split()]
+
+
+def supervisor_pid():
+    st = read_state()
+    if st and pid_alive(st.get("supervisor_pid")):
+        return st["supervisor_pid"]
+    return None
+
+
+# ---------------------------------------------------------------- config
+
+
+def read_op_ref():
+    r = run(["sudo", "-n", "cat", OP_REF_FILE])
+    if r.returncode != 0:
+        die(f"{OP_REF_FILE} is missing. Run `fvpn setup`.")
+    return r.stdout.strip().strip("\"'")
+
+
+def sudo_write(path, content, mode="600"):
+    p = subprocess.run(["sudo", "-n", "tee", path], input=content, text=True, capture_output=True)
+    if p.returncode != 0:
+        die(f"Failed to write {path}: {p.stderr.strip()}")
+    subprocess.run(["sudo", "-n", "chmod", mode, path], check=False)
+
+
+def cmd_setup(_args):
+    require("op", "brew install 1password-cli")
+    prime_sudo()
+    print(f"Writing {bold(CONFIG_FILE)}.\n")
+
+    host = input("VPN hostname: ").strip()
+    if not host:
+        die("A hostname is required.")
+    port = input("Port [443]: ").strip() or "443"
+    username = input("Username (or DOMAIN\\user): ").strip()
+    if not username:
+        die("A username is required.")
+
+    print("\n1Password secret reference for the VPN password, e.g. op://Vault/Item/password.")
+    print("In the 1Password app: right-click the item -> Copy Secret Reference.")
+    opref = input("1Password reference: ").strip().strip("\"'")
+    if not opref:
+        die("A 1Password reference is required.")
+    if run(["op", "read", opref]).returncode != 0:
+        die(f"Could not read '{opref}' via op. Check the reference and that you are signed in.")
+
+    subprocess.run(["sudo", "-n", "mkdir", "-p", CONFIG_DIR], check=False)
+    sudo_write(CONFIG_FILE, f"host = {host}\nport = {port}\nusername = {username}\n")
+    sudo_write(OP_REF_FILE, opref + "\n")
+    print(f"Saved {CONFIG_FILE} and {OP_REF_FILE}.")
+
+
+# ---------------------------------------------------------------- split DNS
+
+# openfortivpn's own DNS registration through SCDynamicStore fails silently on
+# some macOS versions, leaving the VPN nameservers unset while the tunnel is up.
+# Parse what the gateway handed us and write /etc/resolver/<domain> files
+# instead. RESOLVER_MANIFEST records what we created so cleanup is exact.
+
+ADDR_RE = re.compile(r"ns \[([^\]]*)\].*ns_suffix \[([^\]]*)\]")
+
+
+def parse_dns(line):
+    m = ADDR_RE.search(line)
+    if not m:
+        return [], []
+    servers = [s for s in (x.strip() for x in m.group(1).split(",")) if s and s != "0.0.0.0"]
+    domains = [d for d in (x.strip() for x in m.group(2).split(";")) if d]
+    return servers, domains
+
+
+def apply_split_dns(servers, domains):
+    """Root only. Returns the domains actually configured."""
+    if not servers or not domains:
+        return []
+    os.makedirs(RESOLVER_DIR, exist_ok=True)
+    body = "".join(f"nameserver {s}\n" for s in servers)
+    for d in domains:
+        with open(f"{RESOLVER_DIR}/{d}", "w") as f:
+            f.write(body)
+    with open(RESOLVER_MANIFEST, "w") as f:
+        f.write("\n".join(domains) + "\n")
+    flush_dns()
+    return domains
+
+
+def remove_split_dns():
+    """Root only."""
+    try:
+        with open(RESOLVER_MANIFEST) as f:
+            domains = [d.strip() for d in f if d.strip()]
+    except OSError:
+        return
+    for d in domains:
+        try:
+            os.unlink(f"{RESOLVER_DIR}/{d}")
+        except OSError:
+            pass
+    try:
+        os.unlink(RESOLVER_MANIFEST)
+    except OSError:
+        pass
+    flush_dns()
+
+
+def flush_dns():
+    subprocess.run(["dscacheutil", "-flushcache"], check=False)
+    subprocess.run(["killall", "-HUP", "mDNSResponder"], check=False, stderr=subprocess.DEVNULL)
+
+
+def stale_resolvers():
+    return os.path.exists(RESOLVER_MANIFEST)
+
+
+def clean_stale_resolvers():
+    """Leftover resolver files with no tunnel would point real domains at
+    unreachable internal IPs. Drop them."""
+    if supervisor_pid() or openfortivpn_pids() or not stale_resolvers():
+        return
+    note("Found split-DNS entries with no tunnel running; cleaning up.")
+    subprocess.run(
+        ["sudo", "-n", sys.executable, os.path.abspath(__file__), "__clean_dns"], check=False
+    )
+
+
+# ---------------------------------------------------------------- supervisor
+
+
+class Supervisor:
+    """Runs as root. Keeps one openfortivpn alive until told to stop."""
+
+    def __init__(self, password, exe):
+        self.password = password
+        self.exe = exe
+        self.child = None
+        self.stopping = False
+        self.session_error = None
+        self.state = {
+            "supervisor_pid": os.getpid(),
+            "started_at": time.time(),
+            "state": "connecting",
+            "connected_at": None,
+            "sessions": 0,
+            "ifname": None,
+            "resolver_domains": [],
+            "last_error": None,
+        }
+
+    def save(self, **kw):
+        self.state.update(kw)
+        write_state(self.state)
+
+    def stop(self, *_):
+        self.stopping = True
+        if self.child and self.child.poll() is None:
+            self.child.terminate()
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.stop)
+        signal.signal(signal.SIGINT, self.stop)
+
+        base = [
+            l for l in open(CONFIG_FILE).read().splitlines()
+            if not l.strip().startswith("password")
+        ]
+        fd = os.open(SESSION_CONF, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(base) + f"\npassword = {self.password}\n")
+
+        self.save()
+        streak = 0
+        try:
+            while not self.stopping:
+                started = time.time()
+                self.session()
+                if self.stopping:
+                    break
+                lasted = time.time() - started
+                if lasted >= STABLE_SESSION:
+                    streak = 0
+                    delay = 3
+                else:
+                    streak += 1
+                    delay = min(5 * 2 ** (streak - 1), 120)
+                if streak >= MAX_FAILURE_STREAK:
+                    self.log(f"giving up after {streak} short-lived sessions")
+                    self.save(state="failed")  # last_error already holds the reason
+                    return
+                self.log(f"reconnecting in {delay}s" + (f" (failure #{streak})" if streak else ""))
+                self.save(state="reconnecting", connected_at=None)
+                for _ in range(delay):
+                    if self.stopping:
+                        break
+                    time.sleep(1)
+        finally:
+            self.cleanup()
+
+    def session(self):
+        """One openfortivpn run, from spawn to exit."""
+        self.log("starting openfortivpn")
+        self.session_error = None
+        # A pipe would make openfortivpn block-buffer its output, so "Tunnel is
+        # up" could arrive minutes late. Give it a pty instead.
+        master, slave = pty.openpty()
+        self.child = subprocess.Popen(
+            [self.exe, "-c", SESSION_CONF],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=slave,
+        )
+        os.close(slave)
+        buf = b""
+        try:
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError as e:
+                    if e.errno == errno.EIO:  # macOS signals pty EOF this way
+                        break
+                    raise
+                if not chunk:
+                    break
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    self.handle_line(raw.decode(errors="replace").rstrip("\r"))
+        finally:
+            os.close(master)
+
+        rc = self.child.wait()
+        self.child = None
+        remove_split_dns()
+        self.save(resolver_domains=[], connected_at=None)
+        if not self.stopping:
+            self.log(f"openfortivpn exited with code {rc}")
+            self.save(last_error=self.session_error or f"openfortivpn exited with code {rc}")
+
+    def handle_line(self, line):
+        self.log(line, raw=True)
+        if "ns_suffix [" in line:
+            servers, domains = parse_dns(line)
+            applied = apply_split_dns(servers, domains)
+            self.save(resolver_domains=applied)
+            if not applied:
+                self.log("gateway sent no usable DNS; system DNS left untouched")
+        if not self.state["ifname"]:
+            m = re.search(r"\bppp\d+\b", line)
+            if m:
+                self.save(ifname=m.group(0))
+        if "Tunnel is up and running" in line:
+            self.save(
+                state="connected",
+                connected_at=time.time(),
+                sessions=self.state["sessions"] + 1,
+                last_error=None,
+            )
+        if line.startswith("ERROR:"):
+            self.session_error = line[len("ERROR:"):].strip()
+        if re.search(r"(?i)two-factor|token:", line):
+            self.session_error = "gateway asked for a token code; FortiToken push did not work"
+
+    def cleanup(self):
+        remove_split_dns()
+        for p in openfortivpn_pids():
+            try:
+                os.kill(p, signal.SIGTERM)
+            except OSError:
+                pass
+        try:
+            os.unlink(SESSION_CONF)
+        except OSError:
+            pass
+        final = "failed" if self.state["state"] == "failed" else "stopped"
+        self.save(state=final, connected_at=None, resolver_domains=[], supervisor_pid=None)
+        self.log("supervisor stopped")
+
+    def log(self, msg, raw=False):
+        stamp = time.strftime("%H:%M:%S")
+        print(msg if raw else f"{stamp} fvpn: {msg}", flush=True)
+
+
+def cmd_supervise(args):
+    if os.geteuid() != 0:
+        die("__supervise must run as root; use `fvpn up`.")
+    password = sys.stdin.readline().rstrip("\n")
+    if not password:
+        die("No password on stdin.")
+    os.makedirs(RUN_DIR, exist_ok=True)
+    os.chmod(RUN_DIR, 0o755)
+    daemonize()
+    Supervisor(password, args.exe).run()
+
+
+def daemonize():
+    """Detach from the caller's terminal and send all output to the log.
+
+    We cannot let `sudo` itself run in a new session: macOS sudo keys its
+    password timestamp to the controlling tty, so a setsid'd sudo would ask
+    for a password again. So sudo stays attached and we detach afterwards.
+    """
+    if os.fork() > 0:
+        os._exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    os.umask(0o022)
+    os.chdir("/")
+    log = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.dup2(log, 1)
+    os.dup2(log, 2)
+    os.close(null)
+    if log > 2:
+        os.close(log)
+
+
+def cmd_clean_dns(_args):
+    if os.geteuid() != 0:
+        die("__clean_dns must run as root.")
+    remove_split_dns()
+
+
+# ---------------------------------------------------------------- commands
+
+
+def require(binary, hint):
+    if not shutil.which(binary):
+        die(f"{binary} not found. Install with: {hint}")
+
+
+def prime_sudo():
+    """Get a sudo timestamp interactively so later `sudo -n` calls succeed."""
+    if run(["sudo", "-n", "true"]).returncode == 0:
+        return
+    if not sys.stdin.isatty():
+        die("sudo needs a password and there is no terminal. Run `fvpn up` from a shell.")
+    if subprocess.run(["sudo", "-v"]).returncode != 0:
+        die("sudo authentication failed.")
+
+
+def rotate_log():
+    r = run(["sudo", "-n", "stat", "-f", "%z", LOG_FILE])
+    if r.returncode == 0 and int(r.stdout.strip() or 0) > LOG_MAX_BYTES:
+        subprocess.run(["sudo", "-n", "sh", "-c", f": > {LOG_FILE}"], check=False)
+
+
+def cmd_up(args):
+    require("openfortivpn", "brew install openfortivpn")
+    require("op", "brew install 1password-cli")
+
+    if supervisor_pid():
+        st = read_state()
+        note(f"Already running ({st['state']}). Use `fvpn status`.")
+        return
+
+    prime_sudo()
+    clean_stale_resolvers()
+    if not os.path.exists(CONFIG_FILE):
+        cmd_setup(args)
+
+    opref = read_op_ref()
+    r = run(["op", "read", opref])
+    if r.returncode != 0:
+        die(f"Failed to read the password from 1Password ({opref}): {r.stderr.strip()}")
+    password = r.stdout.strip()
+
+    subprocess.run(["sudo", "-n", "mkdir", "-m", "755", "-p", RUN_DIR], check=False)
+    subprocess.run(["sudo", "-n", "sh", "-c", f"touch {LOG_FILE} && chmod 644 {LOG_FILE}"], check=False)
+    rotate_log()
+
+    # Hand the password over on stdin, never on the command line. The child
+    # daemonizes itself, so sudo returns as soon as the supervisor is detached.
+    proc = subprocess.Popen(
+        ["sudo", "-n", sys.executable, os.path.abspath(__file__), "__supervise",
+         "--exe", shutil.which("openfortivpn")],
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+    proc.stdin.write(password + "\n")
+    proc.stdin.close()
+    del password
+    try:
+        if proc.wait(timeout=15) != 0:
+            die(f"Failed to start the supervisor. See {LOG_FILE}")
+    except subprocess.TimeoutExpired:
+        die("Supervisor did not detach.")
+
+    print("Connecting... approve the FortiToken push on your phone.")
+    deadline = time.time() + UP_TIMEOUT
+    while time.time() < deadline:
+        st = read_state() or {}
+        if st.get("state") == "connected":
+            print(green("Connected."))
+            if st.get("resolver_domains"):
+                print(dim(f"Split DNS: {', '.join(st['resolver_domains'])}"))
+            return
+        if st.get("state") in ("failed", "stopped") or (
+            st.get("state") == "reconnecting" and not st.get("sessions")
+        ):
+            die(f"{st.get('last_error') or 'Connection failed'}. See `fvpn log`.")
+        time.sleep(1)
+    die(f"Timed out after {UP_TIMEOUT}s waiting for the tunnel. See `fvpn log`.")
+
+
+def cmd_down(_args):
+    pid = supervisor_pid()
+    if not pid and not openfortivpn_pids():
+        print(dim("Already disconnected."))
+        if stale_resolvers():
+            prime_sudo()
+            clean_stale_resolvers()
+        return
+
+    prime_sudo()
+    if pid:
+        subprocess.run(["sudo", "-n", "kill", "-TERM", str(pid)], check=False)
+        for _ in range(15):
+            if not pid_alive(pid):
+                break
+            time.sleep(1)
+    if openfortivpn_pids():
+        subprocess.run(["sudo", "-n", "pkill", "-x", "openfortivpn"], check=False)
+        for _ in range(10):
+            if not openfortivpn_pids():
+                break
+            time.sleep(1)
+
+    if openfortivpn_pids():
+        die("Failed to stop openfortivpn.")
+    clean_stale_resolvers()
+    print(dim("Disconnected."))
+
+
+def human(seconds):
+    seconds = int(seconds)
+    h, m, s = seconds // 3600, seconds % 3600 // 60, seconds % 60
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m {s}s" if m else f"{s}s"
+
+
+def cmd_status(args):
+    st = read_state() or {}
+    alive = pid_alive(st.get("supervisor_pid"))
+    state = st.get("state") if alive else "stopped"
+    tunnel = bool(openfortivpn_pids())
+
+    if args.json:
+        print(json.dumps({**st, "supervisor_alive": alive, "openfortivpn_running": tunnel}, indent=2))
+        return
+
+    if state == "connected" and tunnel:
+        print(green("Connected") + dim(f"  up {human(time.time() - st['connected_at'])}"))
+    elif state == "connecting":
+        print(yellow("Connecting") + dim("  approve the FortiToken push"))
+    elif state == "reconnecting":
+        print(yellow("Reconnecting"))
+    elif tunnel:
+        print(yellow("Tunnel running, but no supervisor") + dim("  it will not reconnect on drop"))
+    else:
+        print(dim("Disconnected"))
+
+    if alive:
+        sessions = st.get("sessions", 0)
+        print(
+            dim(
+                f"supervisor pid {st['supervisor_pid']}, "
+                f"running {human(time.time() - st['started_at'])}, "
+                f"{sessions} session(s), {max(sessions - 1, 0)} reconnect(s)"
+            )
+        )
+    if st.get("resolver_domains"):
+        print(dim(f"split DNS: {', '.join(st['resolver_domains'])}"))
+    if st.get("last_error"):
+        print(red(f"last error: {st['last_error']}"))
+    if not alive and not tunnel and stale_resolvers():
+        note(f"Stale split-DNS entries in {RESOLVER_DIR}. `fvpn down` clears them.")
+
+
+def cmd_log(args):
+    cmd = ["sudo", "tail"] + (["-f"] if args.follow else []) + ["-n", str(args.lines), LOG_FILE]
+    try:
+        subprocess.run(cmd, check=False)
+    except KeyboardInterrupt:
+        pass
+
+
+# ---------------------------------------------------------------- main
+
+
+def main():
+    p = argparse.ArgumentParser(prog="fvpn", description="FortiGate VPN with auto-reconnect.")
+    sub = p.add_subparsers(dest="cmd")
+
+    sub.add_parser("up", help="connect and keep the tunnel up").set_defaults(fn=cmd_up)
+    sub.add_parser("down", help="disconnect").set_defaults(fn=cmd_down)
+
+    s = sub.add_parser("status", help="show connection state")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("log", help="tail the log")
+    s.add_argument("-f", "--follow", action="store_true")
+    s.add_argument("-n", "--lines", type=int, default=40)
+    s.set_defaults(fn=cmd_log)
+
+    sub.add_parser("setup", help="(re)write the gateway config").set_defaults(fn=cmd_setup)
+    s = sub.add_parser("__supervise")
+    s.add_argument("--exe", required=True)
+    s.set_defaults(fn=cmd_supervise)
+    sub.add_parser("__clean_dns").set_defaults(fn=cmd_clean_dns)
+
+    args = p.parse_args()
+    if not args.cmd:
+        p.print_help()
+        sys.exit(1)
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

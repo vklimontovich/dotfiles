@@ -22,16 +22,23 @@ What I actually use day-to-day, and where to look in the repo.
   per-machine config goes in `~/.zshrc.local`, sourced at the end. What's custom
   on top of stock oh-my-zsh:
     - Custom two-line prompt `intheloop` (in `bin/commonrc-post`):
-      `[user@host] cwd (git)` on the left; venv, AWS profile, k8s context,
+      `[user@host] cwd (git)` on the left; venv, gcloud config, k8s context,
       last-command time, exit status on the right.
     - Auto-activate `.venv/` on `cd` (and deactivate when leaving the dir tree).
-    - AWS profile persisted across shells in `~/.aws-profile`.
+    - AWS profile and gcloud config persisted across shells in `~/.aws-profile`
+      and `~/.gcloud-profile`.
     - Lazy `fnm` setup, plus a small `_lazy_load` helper for slow init scripts.
     - Aliases: `k=kubectl`, `ll=ls -lh`, `pnpm`/`bun` wrapped through `ding`.
 - **Claude Code / Codex** — coding agents. `claude` and `codex` are profile
   pickers in `bin/commonrc`: use `--profile <name>` / `-P <name>`,
   `CLAUDE_PROFILE` / `CODEX_PROFILE`, or the interactive picker. Codex keeps
   each profile in an isolated `CODEX_HOME` under `~/.codex-profiles/`.
+  `dotfiles claude-hooks` wires `bin/cc-hook` into every Claude profile:
+  the zellij tab reads `🧠 · <session>` (icon: `CC_TAB_ICON`) (the `/rename` title, else Claude's auto
+  title), gets a `●` when Claude waits on you in a background tab, and desktop
+  notifications show the session plus an excerpt of Claude's question or reply,
+  with the Claude icon (a renamed terminal-notifier copy in `~/Applications`).
+  Clicking one jumps to the pane. Needs zellij ≥ 0.44 (`rename-tab --tab-id`).
 - **[Git](https://git-scm.com/)** — `.gitconfig` (identity, LFS, Kaleidoscope
   diff/merge), `.gitignore_global`, and `.config/git/ignore`. Machine paths use
   `~` so the same config works on Linux remotes.
@@ -44,7 +51,8 @@ Small helpers in `bin/`:
   5s. `bun` and `pnpm` are aliased through it so long installs nudge me.
   `ding` with no args fires a test notification.
 - `selectors` — fzf-driven pickers, sourced from `commonrc`:
-  `ap` (AWS profile), `kk` (kubectl context), `kn` (kubectl namespace).
+  `ap` (AWS profile), `gp` (gcloud config), `kk` (kubectl context),
+  `kn` (kubectl namespace).
 - `idea`, `mate` — open files from the shell in IntelliJ / VS Code.
 - `dff` — render a `git diff` as a Pierre HTML page and open it in the browser.
   Works standalone (`dff origin/main...HEAD`) or as `GIT_EXTERNAL_DIFF=dff git diff`.
@@ -81,6 +89,55 @@ To push the same setup to a remote machine:
 
 The deploy refuses to overwrite a remote dotfiles checkout that has uncommitted
 changes; pass `--ignore-changes` to force.
+
+## Agent skills and commands
+
+Every agent CLI reads skills, instructions and slash commands from its own
+config dir, and I run several profiles of each (`~/.claude-profiles/*`,
+`~/.codex-profiles/*`, `~/.gemini`). One repo feeds all of them:
+[`~/agents`](https://github.com/vklimontovich/agents). One command syncs it:
+
+```sh
+~/dotfiles/dotfiles agents-sync            # update, install, link everything
+~/dotfiles/dotfiles agents-sync --no-fetch # relink only, no download
+~/dotfiles/dotfiles agents-sync --list     # what is installed, and from where
+```
+
+`agents-sync` does four things:
+
+1. clones or updates `~/agents`;
+2. points every profile's `CLAUDE.md` at `~/agents/AGENTS.md`;
+3. downloads each entry of `~/agents/skills.yaml` with
+   [`npx skills`](https://github.com/vercel-labs/skills) into
+   `~/agents/skills/<name>` and symlinks that dir into every target's `skills/`;
+4. symlinks every `~/agents/commands/<name>.md` into each Claude profile's
+   `commands/`, so `/name` works in all of them.
+
+It also removes skills and links that `skills.yaml` no longer asks for. It is
+idempotent — run it any time.
+
+Commands go to Claude profiles only, because the format is Claude Code's:
+frontmatter plus a !`shell` block. For example `~/agents/commands/idea.md`
+opens the working directory in IntelliJ IDEA.
+
+`~/agents/skills` is the source of truth. A skill you write there by hand is
+tracked in git and linked like the rest; sync never touches it. Skills that come
+from `skills.yaml` are gitignored, because sync can fetch them again.
+
+One entry per repo, not per skill:
+
+```yaml
+skills:
+  - source: vercel-labs/agent-skills       # owner/repo on GitHub
+    select: [web-design-guidelines]        # omit for every skill in the repo
+    targets: [claude:pp]                   # optional, narrows the targets
+```
+
+The default target lists are `SKILLS_DEFAULT_TARGETS` and
+`COMMANDS_DEFAULT_TARGETS` in the `dotfiles` script, not the yaml. Tokens: `claude` and `codex` mean every profile of that CLI plus its
+native home, `claude:<name>` / `codex:<name>` mean one profile, `gemini` is
+`~/.gemini`, `agents` is the legacy `~/.agents`, and any path links into
+`<path>/skills`.
 
 ## Ghostty + Zellij
 
